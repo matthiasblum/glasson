@@ -11,7 +11,7 @@ setup(
     version=_VERSION,
     description='glasson is a binary and compressed file format for storing Hi-C contact maps',
     author='Matthias Blum',
-    py_module='glasson',
+    py_modules=['glasson'],
     scripts=['bin/glatools'],
     url='https://github.com/matthiasblum/glasson',
     license='Public Domain'
