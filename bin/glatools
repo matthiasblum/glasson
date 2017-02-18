@@ -1,0 +1,35 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import argparse
+
+from glasson import read, create
+
+
+def main():
+    parser = argparse.ArgumentParser(prog='glasson.py', description='Storage format for Hi-C data')
+    subparsers = parser.add_subparsers(dest='command', help='command')
+    subparsers.required = True
+
+    parser_create = subparsers.add_parser('create', help='Store Hi-C contact maps')
+    parser_create.add_argument('index', help='index of matrix files')
+    parser_create.add_argument('chrom_lens', metavar='chrom.sizes', help='UCSC chromosome sizes file')
+    parser_create.add_argument('output', help='output file')
+
+    parser_read = subparsers.add_parser('read', help='Extract data from a Glasson file')
+    parser_read.add_argument('input', help='glasson file')
+    parser_read.add_argument('chrom', help='chromosome')
+    parser_read.add_argument('start', help='start coordinate', type=int, default=0)
+    parser_read.add_argument('end', help='end coordinate', type=int, default=0)
+    parser_read.add_argument('-r', dest='resolution', help='resolution', type=int)
+
+    args = parser.parse_args()
+
+    if args.command == 'create':
+        create(args.index, args.chrom_lens, args.output)
+    else:
+        read(args.input, args.chrom, args.start, args.end, resolution=args.resolution)
+
+
+if __name__ == '__main__':
+    main()
