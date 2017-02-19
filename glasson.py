@@ -262,6 +262,10 @@ class File:
             self.fh.seek(start)
             return self.fh.read(end - start)
 
+    def close(self):
+        if not self.remote:
+            self.fh.close()
+
     def query(self, chrom, start=0, end=0, resolution=None):
         chrom_info = self.index.get(chrom)
 
