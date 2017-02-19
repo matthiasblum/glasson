@@ -2,12 +2,65 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import sys
 
-from glasson import read, create
+import glasson
+
+
+def create(index_file, chrom_lens_file, output_file):
+    index_matrices = glasson.load_index(index_file)
+    chrom_lens = glasson.load_chrom_lens(chrom_lens_file)
+
+    with glasson.File(output_file, 'w') as fh:
+        for chrom, resolutions in index_matrices.items():
+            chrom_len = chrom_lens.get(chrom)
+
+            if chrom_len is None:
+                sys.stderr.write("glasson: {} does not contain '{}'\n".format(chrom_lens_file, chrom))
+                exit(1)
+
+            for resolution, matrix_file in resolutions.items():
+                sys.stderr.write('{:<8}\t{:>8}\n'.format(chrom, resolution))
+                mat = glasson.Matrix(matrix_file, chrom_len, resolution)
+                mat.load()
+                fh.write(chrom, chrom_len, resolution, mat)
+
+            while resolution < 1000000:
+                new_res = resolution * 4
+
+                if resolution < 100000 < new_res:
+                    new_res = 100000
+                elif new_res > 100000:
+                    new_res = 1000000
+
+                sys.stderr.write('{:<8}\t{:>8}\n'.format('', new_res))
+                mat_size = (chrom_len + resolution - 1) // resolution
+
+                if mat_size == 1:
+                    break
+
+                mat.resize(new_res)
+                resolution = new_res
+                fh.write(chrom, chrom_len, resolution, mat)
+
+
+def read(filename, chrom, start, end, resolution=None):
+    with glasson.File(filename, 'r') as fh:
+        row, col, data, res = fh.query(chrom, start, end, resolution=resolution)
+
+    for r, c, d in zip(row, col, data):
+        print('{}\t{}\t{}\t{}\t{}\t{}'.format(
+            chrom,
+            r * res,
+            (r + 1) * res,
+            c * res,
+            (c + 1) * res,
+            d
+        ))
 
 
 def main():
-    parser = argparse.ArgumentParser(prog='glasson.py', description='Storage format for Hi-C data')
+    parser = argparse.ArgumentParser(description='Storage format for Hi-C data')
     subparsers = parser.add_subparsers(dest='command', help='command')
     subparsers.required = True
 
