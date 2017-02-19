@@ -16,8 +16,7 @@ def create(index_file, chrom_lens_file, output_file):
             chrom_len = chrom_lens.get(chrom)
 
             if chrom_len is None:
-                sys.stderr.write("glasson: {} does not contain '{}'\n".format(chrom_lens_file, chrom))
-                exit(1)
+                sys.exit("glasson: {} does not contain '{}'\n".format(chrom_lens_file, chrom))
 
             for resolution, matrix_file in resolutions.items():
                 sys.stderr.write('{:<8}\t{:>8}\n'.format(chrom, resolution))
@@ -45,18 +44,24 @@ def create(index_file, chrom_lens_file, output_file):
 
 
 def read(filename, chrom, start, end, resolution=None):
-    with glasson.File(filename, 'r') as fh:
+    try:
+        fh = glasson.File(filename, 'r')
+    except RuntimeError as e:
+        sys.exit(e.args[0])
+    else:
         row, col, data, res = fh.query(chrom, start, end, resolution=resolution)
+        fh.close()
 
-    for r, c, d in zip(row, col, data):
-        print('{}\t{}\t{}\t{}\t{}\t{}'.format(
-            chrom,
-            r * res,
-            (r + 1) * res,
-            c * res,
-            (c + 1) * res,
-            d
-        ))
+        if row is not None:
+            for r, c, d in zip(row, col, data):
+                print('{}\t{}\t{}\t{}\t{}\t{}'.format(
+                    chrom,
+                    r * res,
+                    (r + 1) * res,
+                    c * res,
+                    (c + 1) * res,
+                    d
+                ))
 
 
 def main():

@@ -31,12 +31,10 @@ def load_index(filename):
                 resolution = int(fields[1])
                 matrix = fields[2]
             except (IndexError, ValueError):
-                sys.stderr.write('glasson: {}: invalid format at line {}\n'.format(filename, i + 1))
-                exit(1)
+                sys.exit('glasson: {}: invalid format at line {}'.format(filename, i + 1))
 
             if not os.path.isfile(matrix):
-                sys.stderr.write('glasson: {}: no such file or directory\n'.format(matrix))
-                exit(1)
+                sys.exit('glasson: {}: no such file or directory'.format(matrix))
             elif chrom not in index:
                 index[chrom] = {resolution: matrix}
             else:
@@ -54,8 +52,7 @@ def load_chrom_lens(filename):
                 chrom, size = line.rstrip().split('\t')
                 chrom_lens[chrom] = int(size)
             except ValueError:
-                sys.stderr.write('glasson: {}: invalid format at line {}\n'.format(filename, i + 1))
-                exit(1)
+                sys.exit('glasson: {}: invalid format at line {}'.format(filename, i + 1))
 
     return chrom_lens
 
@@ -82,24 +79,24 @@ class Matrix:
 
         for i, row in enumerate(fh):
             if i == self.size:
-                sys.stderr.write('glasson: {}: expected {} rows\n'.format(self.filename, self.size))
                 fh.close()
-                exit(1)
+                sys.exit('glasson: {}: expected {} rows\n'.format(self.filename, self.size))
 
             col = row.rstrip().split('\t')
             if len(col) != self.size:
-                sys.stderr.write(
-                    'glasson: {}: expected {} fields at line {}, found {}\n'.format(self.filename, self.size, i + 1,
-                                                                                    len(col)))
                 fh.close()
-                exit(1)
+                sys.exit('glasson: {}: expected {} fields at line {}, found {}'.format(
+                    self.filename,
+                    self.size,
+                    i + 1,
+                    len(col)
+                ))
 
             try:
                 col = [float(val) for val in col[i:]]
             except ValueError:
-                sys.stderr.write('glasson: {}: invalid float value at line {}\n'.format(self.filename, i + 1))
                 fh.close()
-                exit(1)
+                sys.exit('glasson: {}: invalid float value at line {}'.format(self.filename, i + 1))
             else:
                 nnz = 0
                 for x in range(self.size - i):
@@ -161,22 +158,11 @@ class Matrix:
         self.size = new_size
         self.resolution = new_resolution
 
-        x = 0
-        for i, nnz in enumerate(self.nzrow):
-            for xx in range(x, x + nnz):
-                j = self.col[xx]
-
-                if i > j:
-                    print(self.resolution, new_resolution, i, j)
-                    exit()
-
-            x += nnz
-
 
 class File:
     def __init__(self, filename, mode='r'):
         if mode not in ('r', 'w'):
-            raise RuntimeError("invalid mode: '{}'".format(mode))
+            raise RuntimeError("glasson: invalid mode: '{}'\n".format(mode))
 
         self.filename = filename
         self.mode = mode
@@ -197,7 +183,7 @@ class File:
             self.remote = True
             self._parseindex()
         else:
-            raise RuntimeError('not a existing file or valid HTTP URL!')
+            raise RuntimeError('glasson: not a existing file nor a valid HTTP URL')
 
     def __enter__(self):
         return self
@@ -214,7 +200,8 @@ class File:
         try:
             res = request.urlopen(req)
         except HTTPError:
-            raise RuntimeError('file not found!')
+            self.close()
+            raise RuntimeError('glasson: file not found')
         else:
             return res.read()
 
@@ -236,7 +223,8 @@ class File:
             is_gla = False
 
         if not is_gla:
-            raise RuntimeError('not a glasson file!')
+            self.close()
+            raise RuntimeError('glasson: not a valid glasson file')
 
         data = self._fetchindex(offset) if self.remote else self._readindex(offset)
 
@@ -305,7 +293,7 @@ class File:
         chrom_info = self.index.get(chrom)
 
         if chrom_info is None:
-            sys.stderr.write("glasson: {}: no chromosome '{}'\n".format(self.filename, chrom))
+            sys.stderr.write("glasson: {}: no chromosome '{}'".format(self.filename, chrom))
             return None, None, None, None
 
         chrom_len = chrom_info['size']

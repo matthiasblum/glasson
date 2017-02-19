@@ -41,7 +41,7 @@ This implementation requires Python 2.7/3.4+ to create/read `glasson` files. No 
 
 ### Sweet! Should I use keep my Hi-C data in glasson files?
 
-For Crick's sake, no! While you are more than welcome to visualize your data on the QC Genomics genome browser, `glasson` is not meant to become the standard format for storing Hi-C data.
+For Crick's sake, no! Although you are more than welcome to visualize your data on the QC Genomics genome browser, `glasson` is not meant to become the standard format for storing Hi-C data.
 
 ### Format specification
  
