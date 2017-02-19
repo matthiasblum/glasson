@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import builtins
 import gzip
 import os
 import struct
@@ -11,6 +12,8 @@ try:
     import urllib.request as request
 except ImportError:
     import urllib2 as request
+finally:
+    from urllib.error import HTTPError
 
 
 _SIGNATURE = 'GLA'
@@ -20,7 +23,7 @@ _VERSION = '0.1'
 def load_index(filename):
     index = {}
 
-    with open(filename, 'rt') as fh:
+    with builtins.open(filename, 'rt') as fh:
         for i, line in enumerate(fh):
             try:
                 fields = line.rstrip().split()
@@ -45,7 +48,7 @@ def load_index(filename):
 def load_chrom_lens(filename):
     chrom_lens = {}
 
-    with open(filename) as fh:
+    with builtins.open(filename) as fh:
         for i, line in enumerate(fh):
             try:
                 chrom, size = line.rstrip().split('\t')
@@ -72,34 +75,42 @@ class Matrix:
         self.data = []
         self.nzrow = []
 
-        with gzip.open(self.filename, 'rt') if self.filename.lower().endswith('.gz') else open(self.filename,
-                                                                                               'rt') as fh:
-            for i, row in enumerate(fh):
-                if i == self.size:
-                    sys.stderr.write('glasson: {}: expected {} rows\n'.format(self.filename, self.size))
-                    exit(1)
+        if self.filename.lower().endswith('.gz'):
+            fh = gzip.open(self.filename, 'rt')
+        else:
+            fh = builtins.open(self.filename, 'rt')
 
-                col = row.rstrip().split('\t')
-                if len(col) != self.size:
-                    sys.stderr.write(
-                        'glasson: {}: expected {} fields at line {}, found {}\n'.format(self.filename, self.size, i + 1,
-                                                                                        len(col)))
-                    exit(1)
+        for i, row in enumerate(fh):
+            if i == self.size:
+                sys.stderr.write('glasson: {}: expected {} rows\n'.format(self.filename, self.size))
+                fh.close()
+                exit(1)
 
-                try:
-                    col = [float(val) for val in col[i:]]
-                except ValueError:
-                    sys.stderr.write('glasson: {}: invalid float value at line {}\n'.format(self.filename, i + 1))
-                    exit(1)
-                else:
-                    nnz = 0
-                    for x in range(self.size - i):
-                        if col[x]:
-                            self.col.append(i + x)
-                            self.data.append(col[x])
-                            nnz += 1
+            col = row.rstrip().split('\t')
+            if len(col) != self.size:
+                sys.stderr.write(
+                    'glasson: {}: expected {} fields at line {}, found {}\n'.format(self.filename, self.size, i + 1,
+                                                                                    len(col)))
+                fh.close()
+                exit(1)
 
-                    self.nzrow.append(nnz)
+            try:
+                col = [float(val) for val in col[i:]]
+            except ValueError:
+                sys.stderr.write('glasson: {}: invalid float value at line {}\n'.format(self.filename, i + 1))
+                fh.close()
+                exit(1)
+            else:
+                nnz = 0
+                for x in range(self.size - i):
+                    if col[x]:
+                        self.col.append(i + x)
+                        self.data.append(col[x])
+                        nnz += 1
+
+                self.nzrow.append(nnz)
+
+        fh.close()
 
     def iter(self):
         x = 0
@@ -165,7 +176,7 @@ class Matrix:
 class File:
     def __init__(self, filename, mode='r'):
         if mode not in ('r', 'w'):
-            raise ValueError("invalid mode: '{}'".format(mode))
+            raise RuntimeError("invalid mode: '{}'".format(mode))
 
         self.filename = filename
         self.mode = mode
@@ -174,38 +185,60 @@ class File:
         self.index = {}
         self.offset = None
 
-    def __enter__(self):
         if self.mode == 'w':
-            self.fh = open(self.filename, 'wb')
+            self.fh = builtins.open(self.filename, 'wb')
             self.fh.write(struct.pack('>3sQ', _SIGNATURE.encode('utf-8'), 0))
             self.offset = 11
         elif os.path.isfile(self.filename):
-            self.fh = open(self.filename, 'rb')
+            self.fh = builtins.open(self.filename, 'rb')
             self.remote = False
             self._parseindex()
-        else:
+        elif self.filename.lower().startswith(('http://', 'https://')):
             self.remote = True
             self._parseindex()
+        else:
+            raise RuntimeError('not a existing file or valid HTTP URL!')
 
+    def __enter__(self):
         return self
 
-    def _readindex(self):
-        signature, offset, = struct.unpack('>3sQ', self.fh.read(11))
-        self.fh.seek(offset)
-        return self.fh.read()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def _readheader(self):
+        return self.fh.read(11)
 
     def _fetchheader(self):
         req = request.Request(self.filename, headers={'Range': 'bytes=0-10'})
-        signature, offset = struct.unpack('>3sQ', request.urlopen(req).read())
 
+        try:
+            res = request.urlopen(req)
+        except HTTPError:
+            raise RuntimeError('file not found!')
+        else:
+            return res.read()
+
+    def _readindex(self, offset):
+        self.fh.seek(offset)
+        return self.fh.read()
+
+    def _fetchindex(self, offset):
         req = request.Request(self.filename, headers={'Range': 'bytes={}-'.format(offset)})
         return request.urlopen(req).read()
 
     def _parseindex(self):
-        if self.remote:
-            data = self._fetchheader()
-        else:
-            data = self._readindex()
+        header = self._fetchheader() if self.remote else self._readheader()
+        signature, offset = struct.unpack('>3sQ', header)
+
+        try:
+            is_gla = signature.decode('utf-8') == 'GLA'
+        except UnicodeDecodeError:
+            is_gla = False
+
+        if not is_gla:
+            raise RuntimeError('not a glasson file!')
+
+        data = self._fetchindex(offset) if self.remote else self._readindex(offset)
 
         x = 0
         while True:
@@ -247,13 +280,6 @@ class File:
         self.fh.seek(3)
         self.fh.write(struct.pack('>Q', self.offset))
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.mode == 'w':
-            self._writeindex()
-            self.fh.close()
-        elif not self.remote:
-            self.fh.close()
-
     def _extract(self, start, end):
         if self.remote:
             req = request.Request(self.filename, headers={'Range': 'bytes={}-{}'.format(start, end - 1)})
@@ -262,8 +288,17 @@ class File:
             self.fh.seek(start)
             return self.fh.read(end - start)
 
+    def chroms(self):
+        return {chrom: info['size'] for chrom, info in self.index.items()}
+
+    def resolutions(self):
+        return {chrom: sorted(info['dsets'].keys()) for chrom, info in self.index.items()}
+
     def close(self):
-        if not self.remote:
+        if self.mode == 'w':
+            self._writeindex()
+            self.fh.close()
+        elif not self.remote:
             self.fh.close()
 
     def query(self, chrom, start=0, end=0, resolution=None):
@@ -345,3 +380,10 @@ class File:
             self.offset += 8 + l
 
 
+def open(filename, mode='r'):
+    try:
+        fh = File(filename, mode)
+    except RuntimeError:
+        fh = None
+    finally:
+        return fh
