@@ -306,7 +306,7 @@ class File:
 
         if chrom_info is None:
             sys.stderr.write("glasson: {}: no chromosome '{}'\n".format(self.filename, chrom))
-            exit(1)
+            return None, None, None, None
 
         chrom_len = chrom_info['size']
         dsets = chrom_info['dsets']
