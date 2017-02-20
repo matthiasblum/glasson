@@ -5,7 +5,7 @@ Glasson (from the French *glaçon* for *ice cube*) is a binary, compressed file 
 
 Yes, unfortunately.
 
-### Background
+## Background
 
 There are many formats for Hi-C data, but this one is mine. It is my best friend. It is my li&hellip;
 
@@ -23,7 +23,7 @@ However, for sake of shortness, we are going to restrict the list of formats to 
 
 Text files are convenient because they are human readable, and can be easily loaded in any programming language, but they do not allow a fast access to a subset of a contact map.
 
-HDF5 files can contains multiple contact maps, allow fast queries, and they are interfaces to the HDF5 format in almost every programming language.
+HDF5 files can contains multiple contact maps, allow fast queries, and there are interfaces to the HDF5 format in almost every programming language.
 However, remote access is not supported: one has to download the entire file to extract any information.
 
 Finally, the `hic` format does allow remote access, and can embed contact maps at multiple resolutions. Nevertheless, it was not described yet when I started to work on Hi-C data.
@@ -35,15 +35,27 @@ The `glasson` format is a generic binary file format aiming to:
 - enable remote access
 - use as little disk space as possible
 
-### Installation
+## Installation
 
-This implementation requires Python 2.7/3.4+ to create/read `glasson` files. No additional library is required. 
+This implementation requires Python 2.7/3.4+ to create/read `glasson` files. No additional library is required. It is recommended to use a virtual environment.
 
-### Sweet! Should I use keep my Hi-C data in glasson files?
+    $ git clone https://github.com/matthiasblum/glasson.git
+    $ cd glasson
+    $ python setup.py install
+
+### Store
+
+TODO
+
+### Extract
+
+TODO
+
+## Sweet! Should I use keep my Hi-C data in glasson files?
 
 For Crick's sake, no! Although you are more than welcome to visualize your data on the QC Genomics genome browser, `glasson` is not meant to become the standard format for storing Hi-C data.
 
-### Format specification
+## Format specification
  
 **Header**
 
@@ -100,7 +112,7 @@ The index contains a list of chromosomes, and a list of contact maps for each ch
 
 *Other chromosomes, and their contact maps, until the end of the file.*
 
-### License
+## License
 
 Public domain.
 
