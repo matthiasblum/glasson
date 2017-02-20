@@ -317,12 +317,18 @@ class File:
         off_start = None
         off_end = None
         i = None
+        found_start = False
 
         for x, _row in enumerate(rows):
             if off_start is None or _row < start:
                 i = _row
                 off_start = offsets[x]
                 off_end = offsets[x]
+            elif _row >= start and not found_start:
+                i = _row
+                off_start = offsets[x]
+                off_end = offsets[x]
+                found_start = True
             elif _row >= end:
                 off_end = offsets[x]
                 break
