@@ -373,7 +373,8 @@ class File:
 def open(filename, mode='r'):
     try:
         fh = File(filename, mode)
-    except RuntimeError:
+    except RuntimeError as e:
+        sys.stderr.write('{}\n'.format(e.args[0]))
         fh = None
     finally:
         return fh

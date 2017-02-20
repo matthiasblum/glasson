@@ -7,7 +7,7 @@ import sys
 import glasson
 
 
-def create(index_file, chrom_lens_file, output_file):
+def store(index_file, chrom_lens_file, output_file):
     index_matrices = glasson.load_index(index_file)
     chrom_lens = glasson.load_chrom_lens(chrom_lens_file)
 
@@ -43,7 +43,7 @@ def create(index_file, chrom_lens_file, output_file):
                 fh.write(chrom, chrom_len, resolution, mat)
 
 
-def read(filename, chrom, start, end, resolution=None):
+def extract(filename, chrom, start, end, resolution=None):
     try:
         fh = glasson.File(filename, 'r')
     except RuntimeError as e:
@@ -69,12 +69,12 @@ def main():
     subparsers = parser.add_subparsers(dest='command', help='command')
     subparsers.required = True
 
-    parser_create = subparsers.add_parser('create', help='Store Hi-C contact maps')
+    parser_create = subparsers.add_parser('store', help='Store Hi-C contact maps')
     parser_create.add_argument('index', help='index of matrix files')
     parser_create.add_argument('chrom_lens', metavar='chrom.sizes', help='UCSC chromosome sizes file')
     parser_create.add_argument('output', help='output file')
 
-    parser_read = subparsers.add_parser('read', help='Extract data from a Glasson file')
+    parser_read = subparsers.add_parser('extract', help='Extract data from a Glasson file')
     parser_read.add_argument('input', help='glasson file')
     parser_read.add_argument('chrom', help='chromosome')
     parser_read.add_argument('start', help='start coordinate', type=int, default=0)
@@ -83,10 +83,10 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == 'create':
-        create(args.index, args.chrom_lens, args.output)
+    if args.command == 'store':
+        store(args.index, args.chrom_lens, args.output)
     else:
-        read(args.input, args.chrom, args.start, args.end, resolution=args.resolution)
+        extract(args.input, args.chrom, args.start, args.end, resolution=args.resolution)
 
 
 if __name__ == '__main__':
