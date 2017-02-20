@@ -39,9 +39,9 @@ The `glasson` format is a generic binary file format aiming to:
 
 This implementation requires Python 2.7/3.4+ to create/read `glasson` files. No additional library is required. It is recommended to use a virtual environment.
 
-    $ git clone https://github.com/matthiasblum/glasson.git
-    $ cd glasson
-    $ python setup.py install
+    git clone https://github.com/matthiasblum/glasson.git
+    cd glasson
+    python setup.py install
 
 ### Store
 
