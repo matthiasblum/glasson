@@ -316,22 +316,25 @@ class File:
         rows, offsets = dsets[resolution]
         off_start = None
         off_end = None
-        i = None
+
+        _rows = []
 
         for x, _row in enumerate(rows):
-            if off_start is None and _row >= start:
-                i = _row
-                off_start = offsets[x]
-                off_end = off_start
-            elif _row < end:
+            if start <= _row < end:
+                if off_start is None:
+                    off_start = offsets[x]
+
                 off_end = offsets[x]
-            else:
+                _rows.append(_row)
+            elif _row >= end:
                 off_end = offsets[x]
                 break
 
         body = self._extract(off_start, off_end)
         l = len(body)
         x = 0
+        i = 0
+
         row = []
         col = []
         data = []
@@ -346,7 +349,7 @@ class File:
             for j in range(n):
                 if _data[j] >= end:
                     break
-                row.append(i)
+                row.append(_rows[i])
                 col.append(_data[j])
                 data.append(_data[n + j])
 
