@@ -229,9 +229,7 @@ class File:
         data = self._fetchindex(offset) if self.remote else self._readindex(offset)
 
         x = 0
-        while True:
-            if x == len(data):
-                break
+        while x < len(data):
 
             chrom_len, l, n = struct.unpack('>3I', data[x:x + 12])
             x += 12

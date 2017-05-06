@@ -9,8 +9,6 @@ Yes, unfortunately.
 
 There are many formats for Hi-C data, but this one is mine. It is my best friend. It is my li&hellip;
 
-*Let's start over, shall we?*
-
 There are many formats for Hi-C data. 
 In fact, every PhD student, researcher, or engineer who analysed Hi-C data at one point has probably developed their own format. 
 However, for sake of shortness, we are going to restrict the list of formats to major ones:
