@@ -1,24 +1,38 @@
 import builtins
 import gzip
+import logging
 import os
 import struct
 import sys
 import tempfile
+from urllib.error import HTTPError
 import zlib
 
-try:
-    import cPickle as pickle
-except ImportError:
+if sys.version_info[0] == 3:
     import pickle
+    import urllib.request as request
+else:
+    try:
+        import cPickle as pickle
+    except ImportError:
+        import pickle
 
-try:
+    import urllib2 as request
+
     range = xrange
-except NameError:
-    pass
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s: %(message)s',
+    datefmt='%y-%m-%d %H:%M:%S',
+    stream=sys.stdout
+)
 
 
 _SIGNATURE = 'GLA'
 _VERSION = 1
+_COMPRESS_LEVEL = 6
 
 
 def _open_text(filename, mode='rt'):
@@ -38,7 +52,7 @@ def load_chrom_sizes(filename):
             chrom, size = line.rstrip().split()
             size = int(size)
         except ValueError:
-            sys.stderr.write('invalid format at line {} in file {}\n'.format(i + 1, filename))
+            logging.critical('invalid format at line {} in file {}'.format(i + 1, filename))
             fh.close()
             exit(1)
         else:
@@ -48,36 +62,10 @@ def load_chrom_sizes(filename):
     return chrom_sizes
 
 
-def load_fragments(filename, chrom_sizes):
-    fragments = []
-
-    fh = _open_text(filename, mode='rt')
-    for i, line in enumerate(fh):
-        try:
-            # file is expected to be sorted by chrom + frag position
-            chrom, start, end, frag_id = line.rstrip().split()
-            start = int(start)
-            end = int(end)
-            frag_id = int(frag_id)
-            chrom_size = chrom_sizes[chrom]
-        except ValueError:
-            sys.stderr.write('invalid format at line {} in file {}\n'.format(i + 1, filename))
-            fh.close()
-            exit(1)
-        except KeyError:
-            sys.stderr.write('unknown chromosome \'{}\' at line {} in file {}\n'.format(chrom, i + 1, filename))
-            fh.close()
-            exit(1)
-        else:
-            fragments.append((chrom, start, end, frag_id))
-
-    fh.close()
-
-    return fragments
-
-
 class ContactMap:
-    def __init__(self, bed_file, mat_file, chrom_sizes, verbose=False, buffersize=0, tmpdir=tempfile.gettempdir()):
+    def __init__(self, bed_file, mat_file, chrom_sizes):
+        self._bed_file = bed_file
+        self._mat_file = mat_file
         self._chrom_sizes = chrom_sizes
         self._frag_ids = {}
         self._chrom_frags = {}
@@ -86,25 +74,26 @@ class ContactMap:
         self._pk_files = {}
         self._bin_size = 0
 
-        self._load_fragments(bed_file)
-        self._load_contacts(mat_file, verbose=verbose, buffersize=buffersize, tmpdir=tmpdir)
+        self._load_fragments()
 
-    def _clean(self):
+    def clean(self):
         for chrom1 in self._pk_files:
             for chrom2 in self._pk_files[chrom1]:
                 os.unlink(self._pk_files[chrom1][chrom2])
+        self._pk_files = {}
+        self._contacts = {}
 
     def __del__(self):
-        self._clean()
+        self.clean()
 
-    def _load_fragments(self, filename):
+    def _load_fragments(self):
         frag_ids = {}
         chrom_frags = {}
         chrom_offsets = {}
         bin_size = 0
         cnt = 0
 
-        fh = _open_text(filename, mode='rt')
+        fh = _open_text(self._bed_file, mode='rt')
 
         i = 0  # just in case the file is empty
         for i, line in enumerate(fh):
@@ -116,11 +105,11 @@ class ContactMap:
                 frag_id = int(frag_id)
                 chrom_size = self._chrom_sizes[chrom]
             except ValueError:
-                sys.stderr.write('invalid format at line {} in file {}\n'.format(i + 1, filename))
+                logging.critical('invalid format at line {} in file {}'.format(i + 1, self._bed_file))
                 fh.close()
                 exit(1)
             except KeyError:
-                sys.stderr.write('unknown chromosome \'{}\' at line {} in file {}\n'.format(chrom, i + 1, filename))
+                logging.critical('unknown chromosome \'{}\' at line {} in file {}'.format(chrom, i + 1, self._bed_file))
                 fh.close()
                 exit(1)
             else:
@@ -139,7 +128,7 @@ class ContactMap:
         fh.close()
 
         if i + 1 != len(frag_ids):
-            sys.stderr.write('expected {} unique fragment IDs, got {}\n'.format(i + 1, len(frag_ids)))
+            logging.critical('expected {} unique fragment IDs, got {}'.format(i + 1, len(frag_ids)))
             exit(1)
 
         if float(bin_size) / cnt == bin_size // cnt:
@@ -153,21 +142,19 @@ class ContactMap:
         self._chrom_offsets = chrom_offsets
         self._chrom_frags = chrom_frags
 
-    def _load_contacts(self, filename, verbose=False, buffersize=0, tmpdir=tempfile.gettempdir()):
-        self._clean()
-        self._pk_files = {}
-        self._contacts = {}
+    def load_contacts(self, verbose=False, buffersize=0, tmpdir=tempfile.gettempdir()):
+        self.clean()
         cnt = 0
-        fh = _open_text(filename, mode='rt')
+        fh = _open_text(self._mat_file, mode='rt')
 
         for x, line in enumerate(fh):
             try:
-                fields = line.rstrip().split()
+                fields = line.rstrip().split('\t')
                 i = int(fields[0])
                 j = int(fields[1])
                 v = float(fields[2])
             except (IndexError, ValueError):
-                sys.stderr.write('invalid format at line {} in file {}\n'.format(x + 1, line))
+                logging.critical('invalid format at line {} in file {}'.format(x + 1, line))
                 fh.close()
                 exit(1)
 
@@ -178,7 +165,7 @@ class ContactMap:
                 chrom1 = self._frag_ids[i]
                 offset = self._chrom_offsets[chrom1]
             except KeyError:
-                sys.stderr.write('invalid fragment ID ({}) at line {} in file {}\n'.format(i, x + 1, filename))
+                logging.critical('invalid fragment ID ({}) at line {} in file {}'.format(i, x + 1, self._mat_file))
                 fh.close()
                 exit(1)
             else:
@@ -188,7 +175,7 @@ class ContactMap:
                 chrom2 = self._frag_ids[j]
                 offset = self._chrom_offsets[chrom2]
             except KeyError:
-                sys.stderr.write('invalid fragment ID ({}) at line {} in file {}\n'.format(i, x + 1, filename))
+                logging.critical('invalid fragment ID ({}) at line {} in file {}'.format(i, x + 1, self._mat_file))
                 fh.close()
                 exit(1)
             else:
@@ -202,8 +189,8 @@ class ContactMap:
                 self._contacts[chrom1][chrom2].append((i, j, v))
 
             cnt += 1
-            if verbose and not cnt % 1000000:
-                sys.stderr.write('{} contacts loaded\n'.format(cnt))
+            if verbose and not (cnt % 100000):
+                logging.info('{} contacts loaded'.format(cnt))
 
             if buffersize and not cnt % buffersize:
                 for chrom1 in self._contacts:
@@ -291,13 +278,126 @@ class File:
         elif os.path.isfile(self._filename):
             self._fh = builtins.open(self._filename, 'rb')
             self._remote = False
-            # self._parseindex()
+            self._parseindex()
         elif self._filename.lower().startswith(('http://', 'https://')):
             self._fh = None
-            self.remote = True
-            # self._parseindex()
+            self._remote = True
+            self._parseindex()
         else:
             raise RuntimeError('{} is not an existing file nor a valid HTTP URL'.format(self._filename))
+
+    def _fetch(self, offset, size=None):
+        if size:
+            range = 'bytes={}-{}'.format(offset, size-1)
+        else:
+            range = 'bytes={}-'.format(offset)
+
+        req = request.Request(self._filename, headers={'Range': range})
+
+        try:
+            res = request.urlopen(req)
+        except HTTPError:
+            self.close()
+            raise RuntimeError('glasson: file not found')
+        else:
+            return res.read()
+
+    def _parseindex(self):
+        if self._remote:
+            data = self._fetch(0, 17)
+        else:
+            data = self._fh.read(17)
+
+        signature, version, offset, blocksize = struct.unpack('<3sHQI', data)
+
+        try:
+            is_gla = signature.decode('utf-8') == 'GLA'
+        except UnicodeDecodeError:
+            is_gla = False
+
+        if not is_gla:
+            self.close()
+            raise RuntimeError('glasson: not a valid glasson file')
+
+        if self._remote:
+            data = self._fetch(17, blocksize)
+        else:
+            data = self._fh.read(blocksize)
+
+        n_chroms, = struct.unpack('<H', data[:2])
+        x = 2
+
+        chroms = []
+
+        for _ in range(n_chroms):
+            l, chrom_size = struct.unpack('<HI', data[x:x+6])
+            x += 6
+
+            chrom_name = data[x:x+l].decode('utf-8')
+            x += l
+
+            chroms.append({
+                'name': chrom_name,
+                'size': chrom_size
+            })
+
+        n_maps, = struct.unpack('<H', data[x:x+2])
+        x += 2
+
+        maps = []
+
+        for _ in range(n_maps):
+            l, = struct.unpack('<I', data[x:x+4])
+            x += 4
+
+            if l:
+                name = data[x:x+l].decode('utf-8')
+                x += l
+            else:
+                name = None
+
+            bin_size, = struct.unpack('<I', data[x:x+4])
+            x += 4
+
+            m = {
+                'name': name,
+                'binsize': bin_size,
+                'chrom_frags': []
+            }
+
+            if not bin_size:
+                for i in range(n_chroms):
+                    n_frags, = struct.unpack('<I', data[x:x+4])
+                    x += 4
+
+                    frags = struct.unpack('<{}I'.format(n_frags), data[x:x+4*n_frags])
+                    x += 4 * n_frags
+
+                    m['chrom_frags'].append(frags)
+
+            maps.append(m)
+
+        if self._remote:
+            data = self._fetch(offset)
+        else:
+            self._fh.seek(offset)
+            data = self._fh.read()
+
+        x = 0
+        for i in range(n_maps):
+            chrom1_idx, chrom2_idx, l = struct.unpack('<2HI', data[x:x+8])
+            x += 2 + 2 + 4
+
+            if maps[i]['binsize']:
+                chrom_size = chroms[chrom1_idx]['size']
+                n_rows = (chrom_size + bin_size - 1) // bin_size
+            else:
+                n_rows = len(maps[i]['chrom_frags'][chrom1_idx])
+
+            s = zlib.decompress(data[x:x+l])
+            x += l
+
+            row_offsets = struct.unpack('<{}Q'.format(n_rows), s)
 
     def add(self, cmap, name=None):
         self._maps.append((cmap, name))
@@ -305,100 +405,120 @@ class File:
     def set_chrom_sizes(self, chrom_sizes):
         self._chrom_sizes = chrom_sizes
 
-    def write(self):
+    def write(self, verbose=False, buffersize=0, tmpdir=tempfile.gettempdir()):
         offset = 0
         fh = self._fh
 
         # Header
-        fh.write(struct.pack('>3s2H', _SIGNATURE.encode('utf-8'), _VERSION, len(self._chrom_sizes)))
-        offset += 3 + 2 + 2
+        fh.write(struct.pack('<3sH', _SIGNATURE.encode('utf-8'), _VERSION))
+        offset += 3 + 2
+
+        _offset = offset
+
+        # Index file position and chrom/res block size
+        fh.write(struct.pack('<QI', 0, 0))
+        offset += 8 + 4
+        blocksize = 0
 
         chroms = list(self._chrom_sizes.keys())
+        fh.write(struct.pack('<H', len(chroms)))
+        blocksize += 2
 
         for chrom_name in chroms:
             l = len(chrom_name)
             fh.write(struct.pack('<HI{}s'.format(l), l, self._chrom_sizes[chrom_name], chrom_name.encode('utf-8')))
-            offset += 2 + 4 + l
+            blocksize += 2 + 4 + l
 
         self._maps.sort(key=lambda tp: tp[0].get_bin_size())
+        fh.write(struct.pack('<H', len(self._maps)))
+        blocksize += 2
         for cmap, name in self._maps:
             bin_size = cmap.get_bin_size()
             if name:
                 l = len(name)
                 fh.write(struct.pack('<I{}sI'.format(l), l, name.encode('utf-8'), bin_size))
+                blocksize += 4 + l + 4
             else:
                 l = 0
                 fh.write(struct.pack('<2I'.format(l), l, bin_size))
-            offset += 2 + l + 2
+                blocksize += 4 + 4
 
-            if bin_size:
-                for chrom, frags in cmap.iter_frags():
-                    chrom_idx = chroms.index(chrom)
+            if not bin_size:
+                for chrom in chroms:
+                    frags = cmap.get_chrom_frags(chrom)
                     n_frags = len(frags)
-                    fh.write(struct.pack('<H{}I'.format(n_frags+1), chrom_idx, n_frags, *frags))
-                    offset = 2 + 4 + n_frags * 4
+                    fh.write(struct.pack('<{}I'.format(n_frags+1), n_frags, *frags))
+                    blocksize += 4 + n_frags * 4
 
-        _offset = offset
-        fh.write(struct.pack('<Q', 0))
+        # current file position
+        offset += blocksize
 
         cmap_offsets = []
 
         # Body
         for cmap, name in self._maps:
-            _cmap_offsets = []
-            # bin_size = cmap.get_bin_size()
+            bin_size = cmap.get_bin_size()
+            cmap.load_contacts(verbose=verbose, buffersize=buffersize, tmpdir=tmpdir)
+            sub_cmap_offsets = []
 
             for chrom1, chrom2, contacts in cmap.iter_contacts():
-                chrom1_idx = chroms.index(chrom1)
-                chrom2_idx = chroms.index(chrom2)
+                if bin_size:
+                    n_rows = (self._chrom_sizes[chrom1] + bin_size - 1) // bin_size
+                else:
+                    n_rows = len(cmap.get_chrom_frags(chrom1))
 
-                #
-                # if bin_size:
-                #     n_rows = (self._chrom_sizes[chrom1] + bin_size - 1) // bin_size
-                # else:
-                #     n_rows = len(cmap.get_chrom_frags(chrom1))
+                row_offsets = []
+                it = iter(contacts)
+                row, col, val = next(it)
+                for i in range(n_rows):
+                    row_offsets.append(offset)
 
-                x = 0
-                row_offsets = [offset]
-                cols = []
-                data = []
-                for i, j, v in contacts:
-                    if i == x:
-                        cols.append(j)
-                        data.append(v)
-                    elif i > x:
-                        n = len(cols)
-                        s = zlib.compress(struct.pack('<I{0}I{0}d'.format(n), n, *(cols + data)), 6)
+                    while row < i:
+                        try:
+                            row, col, val = next(it)
+                        except StopIteration:
+                            break
+
+                    cols = []
+                    data = []
+                    while row == i:
+                        cols.append(row)
+                        data.append(val)
+                        try:
+                            row, col, val = next(it)
+                        except StopIteration:
+                            break
+
+                    n = len(cols)
+                    if n:
+                        s = zlib.compress(struct.pack('<I{0}I{0}d'.format(n), n, *(cols + data)), _COMPRESS_LEVEL)
                         l = len(s)
                         fh.write(struct.pack('<I{}s'.format(l), l, s))
                         offset += 4 + l
+                    else:
+                        fh.write(struct.pack('<I', 0))
+                        offset += 4
 
-                        while x + 1 < i:
-                            # Empty rows
-                            x += 1
-                            row_offsets.append(offset)
-                            fh.write(struct.pack('<I', 0))
-                            offset += 4
-
-                        x += 1
-                        row_offsets.append(offset)
-                        cols = []
-                        data = []
-
-                _cmap_offsets.append(
-                    (chrom1_idx, chrom2_idx, row_offsets)
+                sub_cmap_offsets.append(
+                    (chrom1, chrom2, row_offsets)
                 )
 
-            cmap_offsets.append(_cmap_offsets)
+            cmap.clean()
+            cmap_offsets.append(sub_cmap_offsets)
 
         # Index
-        for i, (cmap, name) in enumerate(self._maps):
-            for chrom1_idx, chrom2_idx, row_offsets in cmap_offsets[i]:
-                s = zlib.compress(struct.pack('<{}Q'.format(len(row_offsets))))
+        for sub_cmap_offsets in cmap_offsets:
+            for chrom1, chrom2, row_offsets in sub_cmap_offsets:
+                chrom1_idx = chroms.index(chrom1)
+                chrom2_idx = chroms.index(chrom2)
+                s = zlib.compress(struct.pack('<{}Q'.format(len(row_offsets)), *row_offsets), _COMPRESS_LEVEL)
+                l = len(s)
+                fh.write(struct.pack('<2HI{}s'.format(l), chrom1_idx, chrom2_idx, l, s))
 
+        fh.seek(_offset)
+        fh.write(struct.pack('<QI', offset, blocksize))
 
-
-    def _close(self):
+    def close(self):
         try:
             self._fh.close()
         except AttributeError:
@@ -407,14 +527,14 @@ class File:
             self._fh = None
 
     def __del__(self):
-        self._close()
+        self.close()
 
 
 def open(filename, mode='r'):
     try:
         fh = File(filename, mode)
     except RuntimeError as e:
-        sys.stderr.write('{}\n'.format(e.args[0]))
+        logging.critical(format(e.args[0]))
         fh = None
     finally:
         return fh

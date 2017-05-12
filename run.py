@@ -9,24 +9,27 @@ import sys
 import gla
 
 
-
-
-
 def create_glasson(chrom_sizes_file, bed_files, mat_files, labels, output, buffersize=0):
     fh = gla.open(output, mode='w')
     chrom_sizes = gla.load_chrom_sizes(chrom_sizes_file)
     fh.set_chrom_sizes(chrom_sizes)
 
     for bed_file, mat_file, label in zip(bed_files, mat_files, labels):
-        cmap = gla.ContactMap(bed_file, mat_file, chrom_sizes, verbose=False, buffersize=buffersize, tmpdir='.')
+        cmap = gla.ContactMap(bed_file, mat_file, chrom_sizes)
         fh.add(cmap, label)
 
-
-    fh.write()
-
+    fh.write(verbose=True, buffersize=buffersize, tmpdir='.')
+    fh.close()
 
 
 def main():
+    url = 'http://hglab.org/data/SRX2179260.gla'
+    fh = gla.open('/home/matthias/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla')
+
+    fh.close()
+    return
+
+
     parser = argparse.ArgumentParser(description='Storage format for Hi-C data')
     subparsers = parser.add_subparsers(dest='command', help='command')
     subparsers.required = True
@@ -73,9 +76,6 @@ def main():
                     labels[x] = label
 
         create_glasson(args.chrom_sizes , args.bed_files, args.mat_files, labels, args.output, buffersize=args.buffersize)
-
-
-
 
 
 if __name__ == '__main__':
