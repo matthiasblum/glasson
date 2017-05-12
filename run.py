@@ -6,29 +6,50 @@ import os
 import sys
 
 
-import gla
+import gla as glasson
 
 
 def create_glasson(chrom_sizes_file, bed_files, mat_files, labels, output, buffersize=0):
-    fh = gla.open(output, mode='w')
-    chrom_sizes = gla.load_chrom_sizes(chrom_sizes_file)
-    fh.set_chrom_sizes(chrom_sizes)
+    fh = glasson.open(output, mode='w')
+    chrom_sizes = glasson.load_chrom_sizes(chrom_sizes_file)
+    fh.chrom_sizes(chrom_sizes)
 
     for bed_file, mat_file, label in zip(bed_files, mat_files, labels):
-        cmap = gla.ContactMap(bed_file, mat_file, chrom_sizes)
+        cmap = glasson.ContactMap(bed_file, mat_file, chrom_sizes)
         fh.add(cmap, label)
 
     fh.write(verbose=True, buffersize=buffersize, tmpdir='.')
     fh.close()
 
 
-def main():
-    url = 'http://hglab.org/data/SRX2179260.gla'
-    filename = '/home/matthias/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla'
-    fh = gla.open(filename)
+def create(chrom_sizes_file, bed_files, mat_files, mat_labels, output):
+    chrom_sizes = glasson.load_chrom_sizes(chrom_sizes_file)
 
-    fh.close()
-    return
+    gla = glasson.Glasson(output, mode='w', chrom_sizes=chrom_sizes)
+
+    for bed, mat, label in zip(bed_files, mat_files, mat_labels):
+        gla.add_mat(bed, mat, label)
+        break
+
+    gla.freeze(processes=4, verbose=True, buffersize=10000000, tmpdir='.')
+
+    gla.close()
+
+
+def main():
+    # url = 'http://hglab.org/data/SRX2179260.gla'
+    # filename = '/home/mblum/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla'
+    # if not os.path.isfile(filename):
+    #     filename = '/home/matthias/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla'
+    #
+    # fh = gla.open(filename)
+    #
+    # # chr1:0-chrM:16,571 & chr4:7,862,541-chr15:94,379,315 [offset 0,4306017:0,0]
+    # fh.query(('chr1', 0, 'chrM', 0), ('chr4', 7e6, 'chr15', 94e6), resolution=1000000)
+    #
+    #
+    # fh.close()
+    # return
 
 
     parser = argparse.ArgumentParser(description='Storage format for Hi-C data')
@@ -76,7 +97,8 @@ def main():
                 else:
                     labels[x] = label
 
-        create_glasson(args.chrom_sizes , args.bed_files, args.mat_files, labels, args.output, buffersize=args.buffersize)
+        #create_glasson(args.chrom_sizes , args.bed_files, args.mat_files, labels, args.output, buffersize=args.buffersize)
+        create(args.chrom_sizes, args.bed_files, args.mat_files, labels, args.output)
 
 
 if __name__ == '__main__':
