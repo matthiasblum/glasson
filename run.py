@@ -24,7 +24,8 @@ def create_glasson(chrom_sizes_file, bed_files, mat_files, labels, output, buffe
 
 def main():
     url = 'http://hglab.org/data/SRX2179260.gla'
-    fh = gla.open('/home/matthias/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla')
+    filename = '/home/matthias/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla'
+    fh = gla.open(filename)
 
     fh.close()
     return

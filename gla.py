@@ -288,7 +288,7 @@ class File:
 
     def _fetch(self, offset, size=None):
         if size:
-            range = 'bytes={}-{}'.format(offset, size-1)
+            range = 'bytes={}-{}'.format(offset, offset+size-1)
         else:
             range = 'bytes={}-'.format(offset)
 
