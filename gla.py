@@ -65,6 +65,39 @@ def _open_text(filename, mode='rt'):
         return builtins.open(filename, mode=mode)
 
 
+def _fetch(url, offset, size=None):
+    """
+    Get data from a remote file.
+    
+    Parameters
+    ----------
+    url : str
+        HTTP[s] URL
+    offset : int
+        Position at which we start to read.
+    size : int, optional
+        Number of bytes to read.
+
+    Returns
+    -------
+        Byte string
+
+    """
+    if size:
+        range = 'bytes={}-{}'.format(offset, offset+size-1)
+    else:
+        range = 'bytes={}-'.format(offset)
+
+    req = request.Request(url, headers={'Range': range})
+
+    try:
+        res = request.urlopen(req)
+    except HTTPError:
+        raise RuntimeError('glasson: file not found')
+    else:
+        return res.read()
+
+
 def load_chrom_sizes(filename):
     """
     Parse a UCSC chrom.sizes file.
@@ -111,7 +144,7 @@ class ContactMap:
         # chrom -> [frag1_start, frag2_start, ...]
         self._frags = {}
 
-        # chrom name -> offset (e.g. chr1 = 0, chr2 = n_frags of chr1, chr3 = n_frags of chr1 + n_frags of chr2, ...)
+        # chrom -> offset (e.g. chr1 = 0, chr2 = n_frags of chr1, chr3 = n_frags of chr1 + n_frags of chr2, ...)
         self._offsets = {}
 
         # bin size: > 0 for fixed-size (i.e. bins), 0 otherwise (i.e. RE fragments)
@@ -130,6 +163,9 @@ class ContactMap:
     @property
     def bin_size(self):
         return self._bs
+
+    def get_frags(self, chrom):
+        return self._frags.get(chrom.lower(), [])
 
     def _detect_format(self):
         if self._is_coo(self._mat_file):
@@ -200,6 +236,9 @@ class ContactMap:
         return status
 
     def load_contacts(self, thread_id=None, **kwargs):
+        self.empty()
+        self._contacts = {}
+
         if self._format == 'coo':
             return self._load_coo(thread_id, **kwargs)
         elif self._format == 'dense':
@@ -214,8 +253,6 @@ class ContactMap:
         tmpdir = kwargs.get('tmpdir', tempfile.gettempdir())
         verbose = kwargs.get('verbose', False)
 
-        self._clean()
-        self._contacts = {}
         status = True
 
         fh = _open_text(self._mat_file, mode='rt')
@@ -295,29 +332,6 @@ class ContactMap:
                         self._contacts[chrom1][chrom2] = []
 
         fh.close()
-
-        if status and buffersize:
-            for chrom1 in self._contacts:
-                for chrom2 in self._contacts[chrom1]:
-                    data = self._contacts[chrom1][chrom2]
-
-                    if chrom1 in self._files and chrom2 in self._files[chrom1]:
-                        with builtins.open(self._files[chrom1][chrom2], 'rb') as pfh:
-                            data += pickle.load(pfh)
-                    else:
-                        fd, path = tempfile.mkstemp(dir=tmpdir)
-                        os.close(fd)
-
-                        if chrom1 not in self._files:
-                            self._files[chrom1] = {chrom2: path}
-                        else:
-                            self._files[chrom1][chrom2] = path
-
-                    with builtins.open(self._files[chrom1][chrom2], 'wb') as pfh:
-                        pickle.dump(data, pfh)
-
-                    self._contacts[chrom1][chrom2] = []
-
         return status
 
     @staticmethod
@@ -371,16 +385,34 @@ class ContactMap:
 
         return b
 
-    def _clean(self):
-        print(self._mat_file)
+    def empty(self):
+        """
+        Delete temporary pickle files. 
+        """
         for chrom1 in self._files:
             for chrom2 in self._files[chrom1]:
                 os.unlink(self._files[chrom1][chrom2])
 
         self._files = {}
 
-    # def __del__(self):
-    #     self._clean()
+    def get_contacts(self):
+        """
+        Generator that returns all the chromosome-chromosome combinations of the contact map with their contacts.
+        
+        Returns
+        -------
+        tuple : (``'chrom1'``, ``'chrom1'``, ``'contacts'``). ``'contacts'`` is an iterator of tuples (``'i'``, ``'j'``, ``'v'``).
+
+        """
+        for chrom1 in self._contacts:
+            for chrom2 in self._contacts[chrom1]:
+                path = self._files.get(chrom1, {}).get(chrom2)
+                if path:
+                    with builtins.open(self._files[chrom1][chrom2], 'rb') as fh:
+                        yield chrom1, chrom2, iter(pickle.load(fh) + self._contacts[chrom1][chrom2])
+                else:
+                    yield chrom1, chrom2, iter(self._contacts[chrom1][chrom2])
+
 
 class Glasson:
     def __init__(self, path, mode='r', chrom_sizes=list()):
@@ -394,6 +426,7 @@ class Glasson:
             ``'w'`` for writing (overwrite the file if it already exists).
         chrom_sizes : list
             List of chromosome size tuples ``(name, size)``.
+            The list order defines the order which will be followed when querying inter-chromosomal regions.
         """
 
         self._path = path
@@ -422,49 +455,452 @@ class Glasson:
         return self._chrom_sizes
 
     def add_mat(self, bed_file, mat_file, mat_label):
-        cmap = ContactMap(bed_file, mat_file, self._chrom_sizes)
+        m = ContactMap(bed_file, mat_file, self._chrom_sizes)
 
-        if not cmap.format:
+        if not m.format:
             raise RuntimeError('cannot detect format for file {}'.format(mat_file))
 
-        self._maps.append(cmap)
+        self._maps.append(m)
         self._labels.append(mat_label)
 
     def freeze(self, aggregate=0, buffersize=0, processes=1, tmpdir=tempfile.gettempdir(), verbose=False):
-        if verbose:
-            logging.info('loading fragments')
+        processes = min([processes, len(self._maps)])
+        if buffersize:
+            buffersize //= processes
 
+        # Load fragments
         with Pool(processes) as pool:
+            if verbose:
+                logging.info('loading fragments')
+
             result = pool.map(self._load_fragments, self._maps)
 
         if not all(result):
             return
 
+        # Reassign result, as ContactMap instances processed by map() are copies
+        self._maps = result
+
+        # Load contacts
+        # todo: load asynchronously and write header while waiting the first map to be ready
+        with Pool(processes) as pool:
+            if verbose:
+                logging.info('loading contacts')
+            kwargs = dict(buffersize=buffersize, verbose=verbose, tmpdir=tmpdir)
+            items = [(i + 1, cmap, kwargs) for i, cmap in enumerate(self._maps)]
+            result = pool.map(self._load_contacts, items)
+
+        if not all(result):
+            return
+
+        # Reassign again
         self._maps = result
 
         if verbose:
-            logging.info('loading contacts')
+            logging.info('writing output')
 
-        with Pool(processes) as pool:
-            kwargs = dict(buffersize=buffersize, verbose=verbose, tmpdir=tmpdir)
-            items = [(i + 1, cmap, kwargs) for i, cmap in enumerate(self._maps)]
+        # For convenience only #lazyass
+        fh = self._fh
 
-            pool.map(self._load_contacts, items)
+        # Write header
+        fh.write(struct.pack('<3sHQI', _SIGNATURE.encode(), _VERSION, 0, 0))
+        offset = 17
+        blocksize = 0
+
+        # Write chromosomes info
+        fh.write(struct.pack('<H', len(self._chrom_sizes)))
+        blocksize += 2
+        for chrom_name, chrom_size in self._chrom_sizes:
+            l = len(chrom_name)
+            fh.write(struct.pack('<HI{}s'.format(l), l, chrom_size, chrom_name.encode()))
+            blocksize += 6 + l
+
+        # Write maps info
+        fh.write(struct.pack('<H', len(self._maps)))
+        blocksize += 2
+
+        # Get the indices that would sort the maps by bin_size
+        # Thus maps with bin_size = 0 (RE frags) are first
+        indices = sorted(range(len(self._maps)), key=lambda i: self._maps[i].bin_size)
+
+        # Sort maps and labels
+        self._maps = [self._maps[i] for i in indices]
+        self._labels = [self._labels[i] for i in indices]
+
+        for m, label in zip(self._maps, self._labels):
+            l = len(label) if label else 0
+            bin_size = m.bin_size
+            fh.write(struct.pack('<2I', l, bin_size))
+
+            if l:
+                fh.write(label.encode())
+
+            blocksize += 8 + l
+
+            if not bin_size:
+                # variable-size windows (RE fragments): store start positions
+                for chrom_name, chrom_size in self._chrom_sizes:
+                    chrom_frags = m.get_frags(chrom_name)
+                    n_frags = len(chrom_frags)
+                    if n_frags:
+                        fh.write(struct.pack('<{}I'.format(n_frags+1), n_frags, *chrom_frags))
+                        blocksize += (n_frags + 1) * 4
+
+        # current file position
+        offset += blocksize
+
+        # Body
+        map_offsets = []
+        # Chrom names in lower case (required, as maps store the names in lower case)
+        chrom_sizes = {chrom_name.lower(): chrom_size for chrom_name, chrom_size in self._chrom_sizes}
+        for m in self._maps:
+            bin_size = m.bin_size
+
+            submap_offsets = []
+
+            for chrom1, chrom2, contacts in m.get_contacts():
+                if bin_size:
+                    n_rows = (chrom_sizes[chrom1] + bin_size - 1) // bin_size
+                else:
+                    n_rows = len(m.get_frags(chrom1))
+
+                row_offsets = []
+                row, col, val = next(contacts)
+                for i in range(n_rows):
+                    row_offsets.append(offset)
+
+                    while row < i:
+                        try:
+                            row, col, val = next(contacts)
+                        except StopIteration:
+                            break
+
+                    cols = []
+                    values = []
+                    while row == i:
+                        cols.append(row)
+                        values.append(val)
+                        try:
+                            row, col, val = next(contacts)
+                        except StopIteration:
+                            break
+
+                    n = len(cols)
+                    if n:
+                        s = zlib.compress(struct.pack('<I{0}I{0}d'.format(n), n, *(cols + values)), _COMPRESS_LEVEL)
+                        l = len(s)
+                        fh.write(struct.pack('<I{}s'.format(l), l, s))
+                        offset += 4 + l
+                    else:
+                        fh.write(struct.pack('<I', 0))
+                        offset += 4
+
+                submap_offsets.append((chrom1, chrom2, row_offsets))
+
+            m.empty()
+            map_offsets.append(submap_offsets)
+
+        # Index/footer
+        index = b''
+        chrom_sizes = [chrom_name.lower() for chrom_name, chrom_size in self._chrom_sizes]
+        for m, submap_offsets in zip(self._maps, map_offsets):
+            index += struct.pack('<I', len(submap_offsets))
+            for chrom1, chrom2, row_offsets in submap_offsets:
+                chrom1_idx = chrom_sizes.index(chrom1)
+                chrom2_idx = chrom_sizes.index(chrom2)
+                index += struct.pack('<2H{}Q'.format(len(row_offsets)), chrom1_idx, chrom2_idx, *row_offsets)
+
+        fh.write(zlib.compress(index, _COMPRESS_LEVEL))
+        fh.seek(5)
+        fh.write(struct.pack('<QI', offset, blocksize))
 
     @staticmethod
     def _load_contacts(args):
         thread_id, cmap, kwargs = args
         return cmap if cmap.load_contacts(thread_id, **kwargs) else None
 
-
     @staticmethod
     def _load_fragments(cmap):
         return cmap if cmap.load_frags() else None
 
     def _sniff(self):
-        pass
+        """
+        Verify that file passed to the constructor is a valid GLA file, and parse the header/index if it is.
+        """
+        self._chrom_sizes = []
+        self._maps = []
+        self._labels = []
+
+        if self._remote:
+            data = _fetch(self._path, 0, 17)
+        else:
+            data = self._fh.read(17)
+
+        signature, version, offset, blocksize = struct.unpack('<3sHQI', data)
+
+        try:
+            is_gla = signature.decode('utf-8') == 'GLA'
+        except UnicodeDecodeError:
+            is_gla = False
+
+        if not is_gla:
+            raise RuntimeError('glasson: not a valid GLA file')
+
+        if self._remote:
+            data = _fetch(self._path, 17, blocksize)
+        else:
+            data = self._fh.read(blocksize)
+
+        n_chroms, = struct.unpack('<H', data[:2])
+        x = 2
+
+        for _ in range(n_chroms):
+            l, chrom_size = struct.unpack('<HI', data[x:x+6])
+            x += 6
+
+            chrom_name = data[x:x+l].decode('utf-8')
+            x += l
+
+            self._chrom_sizes.append((chrom_name, chrom_size))
+
+        n_maps, = struct.unpack('<H', data[x:x + 2])
+        x += 2
+
+        for i in range(n_maps):
+            l, = struct.unpack('<I', data[x:x+4])
+            x += 4
+
+            if l:
+                label = data[x:x+l].decode('utf-8')
+                x += l
+            else:
+                label = None
+
+            bin_size, = struct.unpack('<I', data[x:x+4])
+            x += 4
+
+            m = {
+                'name': label,
+                'binsize': bin_size,
+                'chrom_frags': [],
+                'submaps': {}
+            }
+
+            if not bin_size:
+                for j in range(n_chroms):
+                    n_frags, = struct.unpack('<I', data[x:x+4])
+                    x += 4
+
+                    frags = struct.unpack('<{}I'.format(n_frags), data[x:x+4*n_frags])
+                    x += 4 * n_frags
+
+                    m['chrom_frags'].append(frags)
+
+            self._maps.append(m)
+
+        if self._remote:
+            data = _fetch(offset)
+        else:
+            self._fh.seek(offset)
+            data = self._fh.read()
+
+        data = zlib.decompress(data)
+        x = 0
+        for i in range(n_maps):
+            n_combinations, = struct.unpack('<I', data[x:x + 4])
+            x += 4
+
+            for j in range(n_combinations):
+                chrom1_idx, chrom2_idx = struct.unpack('<2H', data[x:x + 4])
+                x += 4
+
+                chrom1_name, chrom1_size = self._chrom_sizes[chrom1_idx]
+                chrom2_name, chrom2_size = self._chrom_sizes[chrom2_idx]
+
+                if self._maps[i]['binsize']:
+                    n_rows = (chrom1_size + self._maps[i]['binsize'] - 1) // self._maps[i]['binsize']
+                else:
+                    n_rows = len(self._maps[i]['chrom_frags'][chrom1_idx])
+
+                row_offsets = struct.unpack('<{}Q'.format(n_rows), data[x:x + n_rows * 8])
+                x += n_rows * 8
+
+                chrom1_name = chrom1_name.lower()
+                chrom2_name = chrom2_name.lower()
+
+                # todo: really ugly with dictionaries. Replace by object.
+                if chrom1_name not in self._maps[i]['submaps']:
+                    self._maps[i]['submaps'][chrom1_name] = {chrom2_name: row_offsets}
+                else:
+                    self._maps[i]['submaps'][chrom1_name][chrom2_name] = row_offsets
+
+    @staticmethod
+    def _get_chrom_range(chrom1, chrom2, chroms):
+        """
+        Return the list of chromosome indices between two chromosomes.
+        
+        Parameters
+        ----------
+        chrom1 : str
+            chromosome name
+        chrom2 : str
+            chromosome name
+        chrom_names : list
+            list of chromosome names
+
+        Returns
+        -------
+        tuple of ints
+
+        """
+        i = 0
+        j = 0
+
+        try:
+            i = chroms.index(chrom1.lower())
+        except ValueError:
+            logging.critical('unknown chromosome {}'.format(chrom1))
+            exit(1)
+
+        try:
+            j = chroms.index(chrom2.lower())
+        except ValueError:
+            logging.critical('unknown chromosome {}'.format(chrom2))
+            exit(1)
+
+        if i > j:
+            i, j = j, i
+
+        return i, j
+
+    def query(self, x_range, y_range=None, resolution=None):
+        if len(x_range) == 3:
+            x_chrom1, x_start, x_end = x_range
+            x_chrom2 = x_chrom1
+        else:
+            x_chrom1, x_start, x_chrom2, x_end = x_range
+
+        if not y_range:
+            y_chrom1, y_start, y_chrom2, y_end = x_chrom1, x_start, x_chrom2, x_end
+        elif len(y_range) == 3:
+            y_chrom1, y_start, y_end = y_range
+            y_chrom2 = y_chrom1
+        else:
+            y_chrom1, y_start, y_chrom2, y_end = y_range
+
+        chrom_names = [chrom_name.lower() for chrom_name, chrom_size in self._chrom_sizes]
+        x_i, x_j = self._get_chrom_range(x_chrom1, x_chrom2, chrom_names)
+        y_i, y_j = self._get_chrom_range(y_chrom1, y_chrom2, chrom_names)
+
+        m = None
+        for _m in self._maps:
+            # todo: handle RE frags
+            bin_size = _m['binsize']
+            if bin_size and bin_size == resolution:
+                m = _m
+                break
+
+        if m is None:
+            # todo handle error
+            return
+
+        bin_size = m['binsize']
+
+        result = []
+
+        for j in range(y_i, y_j + 1):
+            chrom2, chrom2_size = self._chrom_sizes[j]
+
+            if j == y_i:
+                _ys = y_start // bin_size
+                _ye = (y_end + bin_size - 1) // bin_size if j == y_j else 0
+            elif j < y_j:
+                # from the firs row
+                _ys = 0
+                _ye = 0
+            else:
+                # not all the rows
+                _ys = 0
+                _ye = (y_end + bin_size - 1) // bin_size
+
+            for i in range(x_i, x_j + 1):
+                if i > j:
+                    continue
+
+                chrom1, chrom1_size = self._chrom_sizes[i]
+                row_offsets = m['submaps'].get(chrom1.lower(), {}).get(chrom2.lower(), [])
+
+                if i == x_i:
+                    _xs = x_start // bin_size
+                    _xe = (x_end + bin_size - 1) // bin_size if i == x_j else 0
+                elif i < x_j:
+                    # all the rows
+                    _xs = 0
+                    _xe = 0
+                else:
+                    # trim end of the rows
+                    _xs = 0
+                    _xe = (x_end + bin_size - 1) // bin_size
+
+                _rows = []
+                rows = []
+                cols = []
+                values = []
+
+                _os = None
+                _oe = None
+
+                for k, o in enumerate(row_offsets):
+                    if _ye and k >= _ye:
+                        _oe = o
+                        break
+                    elif k >= _ys:
+                        if _os is None:
+                            _os = o
+                        _oe = o
+                        _rows.append(k)
+
+                if self._remote:
+                    data = _fetch(self._path, _os, _oe - _os)
+                else:
+                    self._fh.seek(_os)
+                    data = self._fh.read(_oe - _os)
+
+                l = len(data)
+                o = 0
+                k = 0
+                while o < l:
+                    ls, = struct.unpack('<I', data[o:o+4])
+                    o += 4
+
+                    if ls:
+                        s = zlib.decompress(data[o:o+ls])
+                        o += ls
+
+                        n, = struct.unpack('<I', s[:4])
+                        _values = list(struct.unpack('<{0}I{0}d'.format(n), s[4:]))
+
+                        for x in range(n):
+                            if _xe and _values[x] >= _xe:
+                                break
+                            elif _values[x] >= _xs:
+                                rows.append(_rows[k])
+                                cols.append(_values[x])
+                                values.append(_values[x+n])
+
+                    k += 1
+
+                result.append((chrom1, chrom2, rows, cols, values))
+
+        return result
 
     def close(self):
+        for m in self._maps:
+            try:
+                m.empty()
+            except AttributeError:
+                pass
+
         try:
             self._fh.close()
         except AttributeError:
@@ -482,583 +918,9 @@ class Glasson:
         self.close()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-class _ContactMap:
-    def __init__(self, bed_file, mat_file, chrom_sizes):
-        """
-
-        Parameters
-        ----------
-        bed_file : str
-            Path to a BED-like file with columns `chrom`, `start`, `end`, `frag_id`.
-        mat_file
-        chrom_sizes
-        """
-        self._bed_file = bed_file
-        self._mat_file = mat_file
-        self._chrom_sizes = {chrom.lower(): size for chrom, size in chrom_sizes}
-        self._frag_ids = {}
-        self._chrom_frags = {}
-        self._chrom_offsets = {}
-        self._contacts = {}
-        self._pk_files = {}
-        self._bin_size = 0
-
-        self._load_fragments()
-
-    def clean(self):
-        for chrom1 in self._pk_files:
-            for chrom2 in self._pk_files[chrom1]:
-                os.unlink(self._pk_files[chrom1][chrom2])
-        self._pk_files = {}
-        self._contacts = {}
-
-    def __del__(self):
-        self.clean()
-
-    def _load_fragments(self):
-        frag_ids = {}
-        chrom_frags = {}
-        chrom_offsets = {}
-        bin_size = 0
-        cnt = 0
-
-        fh = _open_text(self._bed_file, mode='rt')
-
-        i = 0  # just in case the file is empty
-        for i, line in enumerate(fh):
-            try:
-                # file is expected to be sorted by chrom + frag position
-                chrom, start, end, frag_id = line.rstrip().split()
-                start = int(start)
-                end = int(end)
-                frag_id = int(frag_id)
-                chrom_size = self._chrom_sizes[chrom]
-            except ValueError:
-                # logging.critical('invalid format at line {} in file {}'.format(i + 1, self._bed_file))
-                fh.close()
-                exit(1)
-            except KeyError:
-                # logging.critical('unknown chromosome \'{}\' at line {} in file {}'.format(chrom, i + 1, self._bed_file))
-                fh.close()
-                exit(1)
-            else:
-                frag_ids[frag_id] = chrom
-
-                if chrom not in chrom_frags:
-                    chrom_frags[chrom] = [start]
-                    chrom_offsets[chrom] = i
-                else:
-                    chrom_frags[chrom].append(start)
-
-                if end < chrom_size:
-                    cnt += 1
-                    bin_size += end - start
-
-        fh.close()
-
-        if i + 1 != len(frag_ids):
-            # logging.critical('expected {} unique fragment IDs, got {}'.format(i + 1, len(frag_ids)))
-            exit(1)
-
-        if float(bin_size) / cnt == bin_size // cnt:
-            # fixed fragment size
-            self._bin_size = bin_size // cnt
-        else:
-            # variable (most likely RE fragments)
-            self._bin_size = 0
-
-        self._frag_ids = frag_ids
-        self._chrom_offsets = chrom_offsets
-        self._chrom_frags = chrom_frags
-
-    def load_contacts(self, verbose=False, buffersize=0, tmpdir=tempfile.gettempdir()):
-        self.clean()
-        cnt = 0
-        fh = _open_text(self._mat_file, mode='rt')
-
-        for x, line in enumerate(fh):
-            try:
-                fields = line.rstrip().split('\t')
-                i = int(fields[0])
-                j = int(fields[1])
-                v = float(fields[2])
-            except (IndexError, ValueError):
-                # logging.critical('invalid format at line {} in file {}'.format(x + 1, line))
-                fh.close()
-                exit(1)
-
-            if i > j or not v:  # todo: should we raise an error here?
-                continue
-
-            try:
-                chrom1 = self._frag_ids[i]
-                offset = self._chrom_offsets[chrom1]
-            except KeyError:
-                # logging.critical('invalid fragment ID ({}) at line {} in file {}'.format(i, x + 1, self._mat_file))
-                fh.close()
-                exit(1)
-            else:
-                i -= offset
-
-            try:
-                chrom2 = self._frag_ids[j]
-                offset = self._chrom_offsets[chrom2]
-            except KeyError:
-                # logging.critical('invalid fragment ID ({}) at line {} in file {}'.format(i, x + 1, self._mat_file))
-                fh.close()
-                exit(1)
-            else:
-                j -= offset
-
-            if chrom1 not in self._contacts:
-                self._contacts[chrom1] = {chrom2: [(i, j, v)]}
-            elif chrom2 not in self._contacts[chrom1]:
-                self._contacts[chrom1][chrom2] = [(i, j, v)]
-            else:
-                self._contacts[chrom1][chrom2].append((i, j, v))
-
-            cnt += 1
-            if verbose and not (cnt % 100000):
-                # logging.info('{} contacts loaded'.format(cnt))
-                pass
-
-            if buffersize and not cnt % buffersize:
-                for chrom1 in self._contacts:
-                    for chrom2 in self._contacts[chrom1]:
-                        data = self._contacts[chrom1][chrom2]
-
-                        if chrom1 in self._pk_files and chrom2 in self._pk_files[chrom1]:
-                            with builtins.open(self._pk_files[chrom1][chrom2], 'rb') as pfh:
-                                data += pickle.load(pfh)
-                        else:
-                            fd, path = tempfile.mkstemp(dir=tmpdir)
-                            os.close(fd)
-
-                            if chrom1 not in self._pk_files:
-                                self._pk_files[chrom1] = {chrom2: path}
-                            else:
-                                self._pk_files[chrom1][chrom2] = path
-
-                        with builtins.open(self._pk_files[chrom1][chrom2], 'wb') as pfh:
-                            pickle.dump(data, pfh)
-
-                        self._contacts[chrom1][chrom2] = []
-
-        fh.close()
-
-        if buffersize:
-            for chrom1 in self._contacts:
-                for chrom2 in self._contacts[chrom1]:
-                    data = self._contacts[chrom1][chrom2]
-
-                    if chrom1 in self._pk_files and chrom2 in self._pk_files[chrom1]:
-                        with builtins.open(self._pk_files[chrom1][chrom2], 'rb') as pfh:
-                            data += pickle.load(pfh)
-                    else:
-                        fd, path = tempfile.mkstemp(dir=tmpdir)
-                        os.close(fd)
-
-                        if chrom1 not in self._pk_files:
-                            self._pk_files[chrom1] = {chrom2: path}
-                        else:
-                            self._pk_files[chrom1][chrom2] = path
-
-                        with builtins.open(self._pk_files[chrom1][chrom2], 'wb') as pfh:
-                            pickle.dump(data, pfh)
-
-                        self._contacts[chrom1][chrom2] = []
-
-    def iter_contacts(self):
-        for chrom1 in self._contacts:
-            for chrom2 in self._contacts[chrom1]:
-                if self._contacts[chrom1][chrom2]:
-                    data = self._contacts[chrom1][chrom2]
-                else:
-                    with builtins.open(self._pk_files[chrom1][chrom2], 'rb') as fh:
-                        data = pickle.load(fh)
-
-                yield chrom1, chrom2, data
-
-    @property
-    def bin_size(self):
-        return self._bin_size
-
-    @property
-    def chroms(self):
-        return [chrom for chrom, offset in sorted(self._chrom_offsets.items(), key=lambda tp: tp[1])]
-
-    def iter_frags(self):
-        for chrom in self._chrom_frags:
-            yield chrom, self._chrom_frags[chrom]
-
-    def get_chrom_frags(self, chrom):
-        return self._chrom_frags[chrom]
-
-
-class File:
-    def __init__(self, filename, mode='r'):
-        if mode not in ('r', 'w'):
-            raise RuntimeError('invalid mode: \'{}\'\n'.format(mode))
-
-        self._filename = filename
-        self._mode = mode
-        self._index = {}
-        self._offset = None
-        self._chrom_sizes = []
-        self._maps = []  # list of ContactMap in write mode, list of dict in read mode
-
-        if self._mode == 'w':
-            self._fh = builtins.open(self._filename, 'wb')
-            self._remote = False
-        elif os.path.isfile(self._filename):
-            self._fh = builtins.open(self._filename, 'rb')
-            self._remote = False
-            self._sniff()
-        elif self._filename.lower().startswith(('http://', 'https://')):
-            self._fh = None
-            self._remote = True
-            self._sniff()
-        else:
-            raise RuntimeError('{} is not an existing file nor a valid HTTP URL'.format(self._filename))
-
-    def _fetch(self, offset, size=None):
-        if size:
-            range = 'bytes={}-{}'.format(offset, offset+size-1)
-        else:
-            range = 'bytes={}-'.format(offset)
-
-        req = request.Request(self._filename, headers={'Range': range})
-
-        try:
-            res = request.urlopen(req)
-        except HTTPError:
-            self.close()
-            raise RuntimeError('glasson: file not found')
-        else:
-            data = res.read()
-            return data
-
-    def query(self, x_range, y_range=None, resolution=None):
-        if len(x_range) == 3:
-            x_chrom1, x_start, x_end = x_range
-            x_chrom2 = x_chrom1
-        else:
-            x_chrom1, x_start, x_chrom2, x_end = x_range
-
-        if not y_range:
-            y_chrom1, y_start, y_chrom2, y_end = x_chrom1, x_start, x_chrom2, x_end
-        elif len(y_range) == 3:
-            y_chrom1, y_start, y_end = y_range
-            y_chrom2 = y_chrom1
-        else:
-            y_chrom1, y_start, y_chrom2, y_end = y_range
-
-        # x_chrom1 = x_chrom1.lower()
-        # x_chrom2 = x_chrom2.lower()
-        # y_chrom1 = y_chrom1.lower()
-        # y_chrom2 = y_chrom2.lower()
-
-        for chrom_name in (x_chrom1, x_chrom2, y_chrom1, y_chrom2):
-            try:
-                chrom_size = self._chrom_sizes[chrom_name]
-            except KeyError:
-                # logging.critical('unknown chromosome {}'.format(chrom_name))
-                exit(1)
-
-        _map = None
-        for m in self._maps:
-            # todo: handle RE frags
-            bin_size = m['binsize']
-            if bin_size and bin_size == resolution:
-                _map = m
-                break
-
-        if _map is None:
-            # todo handle error
-            return
-
-        x_i = self._chroms.index(x_chrom1)
-        x_j = self._chroms.index(x_chrom2)
-        y_i = self._chroms.index(y_chrom1)
-        y_j = self._chroms.index(y_chrom2)
-
-        print(x_i)
-        print(x_j)
-        print(x_chrom1)
-        print(x_chrom2)
-
-        # for chrom1, chrom2, row_offsets in _map['submaps']:
-        #      if chrom1 == x_chrom1 and chrom2 == x_chrom2:
-        #          print(chrom1, chrom2, len(row_offsets))
-        #          break
-
-    def _sniff(self):
-        self._chrom_sizes = []
-        self._maps = []
-
-        if self._remote:
-            data = self._fetch(0, 17)
-        else:
-            data = self._fh.read(17)
-
-        signature, version, offset, blocksize = struct.unpack('<3sHQI', data)
-
-        try:
-            is_gla = signature.decode('utf-8') == 'GLA'
-        except UnicodeDecodeError:
-            is_gla = False
-
-        if not is_gla:
-            self.close()
-            raise RuntimeError('glasson: not a valid glasson file')
-
-        if self._remote:
-            data = self._fetch(17, blocksize)
-        else:
-            data = self._fh.read(blocksize)
-
-        n_chroms, = struct.unpack('<H', data[:2])
-        x = 2
-
-        for _ in range(n_chroms):
-            l, chrom_size = struct.unpack('<HI', data[x:x+6])
-            x += 6
-
-            chrom_name = data[x:x+l].decode('utf-8')
-            x += l
-
-            self._chrom_sizes[chrom_name] = chrom_size
-
-        n_maps, = struct.unpack('<H', data[x:x+2])
-        x += 2
-
-        for i in range(n_maps):
-            l, = struct.unpack('<I', data[x:x+4])
-            x += 4
-
-            if l:
-                name = data[x:x+l].decode('utf-8')
-                x += l
-            else:
-                name = None
-
-            bin_size, = struct.unpack('<I', data[x:x+4])
-            x += 4
-
-            _map = {
-                'name': name,
-                'binsize': bin_size,
-                'chrom_frags': [],
-                'submaps': []
-            }
-
-            if not bin_size:
-                for j in range(n_chroms):
-                    n_frags, = struct.unpack('<I', data[x:x+4])
-                    x += 4
-
-                    frags = struct.unpack('<{}I'.format(n_frags), data[x:x+4*n_frags])
-                    x += 4 * n_frags
-
-                    _map['chrom_frags'].append(frags)
-
-            self._maps.append(_map)
-
-        if self._remote:
-            data = self._fetch(offset)
-        else:
-            self._fh.seek(offset)
-            data = self._fh.read()
-
-        data = zlib.decompress(data)
-
-        x = 0
-        for i in range(n_maps):
-            n_combinations, = struct.unpack('<I', data[x:x+4])
-            x += 4
-
-            for j in range(n_combinations):
-                chrom1_idx, chrom2_idx = struct.unpack('<2H', data[x:x+4])
-                x += 2 + 2
-
-                chrom1 = self._chroms[chrom1_idx]
-                chrom2 = self._chroms[chrom2_idx]
-
-                if self._maps[i]['binsize']:
-                    chrom_size = self._chrom_sizes[chrom1]
-                    n_rows = (chrom_size + self._maps[i]['binsize'] - 1) // self._maps[i]['binsize']
-                else:
-                    n_rows = len(self._maps[i]['chrom_frags'][chrom1_idx])
-
-                row_offsets = struct.unpack('<{}Q'.format(n_rows), data[x:x+n_rows*8])
-                x += n_rows * 8
-
-                self._maps[i]['submaps'].append((chrom1, chrom2, row_offsets))
-
-    def add(self, cmap, name=None):
-        self._maps.append((cmap, name))
-
-    @property
-    def chrom_sizes(self):
-        return self._chrom_sizes
-
-    @chrom_sizes.setter
-    def chrom_sizes(self, value):
-        self._chrom_sizes = value
-
-    def write(self, verbose=False, buffersize=0, tmpdir=tempfile.gettempdir()):
-        offset = 0
-        fh = self._fh
-
-        # Header
-        fh.write(struct.pack('<3sH', _SIGNATURE.encode('utf-8'), _VERSION))
-        offset += 3 + 2
-
-        _offset = offset
-
-        # Index file position and chrom/res block size
-        fh.write(struct.pack('<QI', 0, 0))
-        offset += 8 + 4
-        blocksize = 0
-
-        chroms = list(self._chrom_sizes.keys())
-        fh.write(struct.pack('<H', len(chroms)))
-        blocksize += 2
-
-        for chrom_name in chroms:
-            l = len(chrom_name)
-            fh.write(struct.pack('<HI{}s'.format(l), l, self._chrom_sizes[chrom_name], chrom_name.lower().encode('utf-8')))
-            blocksize += 2 + 4 + l
-
-        self._maps.sort(key=lambda tp: tp[0].bin_size)
-        fh.write(struct.pack('<H', len(self._maps)))
-        blocksize += 2
-        for cmap, name in self._maps:
-            bin_size = cmap.bin_size
-            if name:
-                l = len(name)
-                fh.write(struct.pack('<I{}sI'.format(l), l, name.encode('utf-8'), bin_size))
-                blocksize += 4 + l + 4
-            else:
-                l = 0
-                fh.write(struct.pack('<2I'.format(l), l, bin_size))
-                blocksize += 4 + 4
-
-            if not bin_size:
-                for chrom in cmap.chroms:
-                    frags = cmap.get_chrom_frags(chrom)
-                    n_frags = len(frags)
-                    fh.write(struct.pack('<{}I'.format(n_frags+1), n_frags, *frags))
-                    blocksize += 4 + n_frags * 4
-
-        # current file position
-        offset += blocksize
-
-        cmap_offsets = []
-
-        # Body
-        for cmap, name in self._maps:
-            bin_size = cmap.bin_size
-            cmap.load_contacts(verbose=verbose, buffersize=buffersize, tmpdir=tmpdir)
-            sub_cmap_offsets = []
-
-            for chrom1, chrom2, contacts in cmap.iter_contacts():
-                if bin_size:
-                    n_rows = (self._chrom_sizes[chrom1] + bin_size - 1) // bin_size
-                else:
-                    n_rows = len(cmap.get_chrom_frags(chrom1))
-
-                row_offsets = []
-                it = iter(contacts)
-                row, col, val = next(it)
-                for i in range(n_rows):
-                    row_offsets.append(offset)
-
-                    while row < i:
-                        try:
-                            row, col, val = next(it)
-                        except StopIteration:
-                            break
-
-                    cols = []
-                    data = []
-                    while row == i:
-                        cols.append(row)
-                        data.append(val)
-                        try:
-                            row, col, val = next(it)
-                        except StopIteration:
-                            break
-
-                    n = len(cols)
-                    if n:
-                        s = zlib.compress(struct.pack('<I{0}I{0}d'.format(n), n, *(cols + data)), _COMPRESS_LEVEL)
-                        l = len(s)
-                        fh.write(struct.pack('<I{}s'.format(l), l, s))
-                        offset += 4 + l
-                    else:
-                        fh.write(struct.pack('<I', 0))
-                        offset += 4
-
-                sub_cmap_offsets.append(
-                    (chrom1, chrom2, row_offsets)
-                )
-
-            cmap.clean()
-            cmap_offsets.append(sub_cmap_offsets)
-
-        # Index
-        index = b''
-        for i, sub_cmap_offsets in enumerate(cmap_offsets):
-            cmap = self._maps[i][0]
-            chroms = cmap.chroms
-
-            index += struct.pack('<I', len(sub_cmap_offsets))
-            for chrom1, chrom2, row_offsets in sub_cmap_offsets:
-                chrom1_idx = chroms.index(chrom1)
-                chrom2_idx = chroms.index(chrom2)
-                index += struct.pack('<2H{}Q'.format(len(row_offsets)), chrom1_idx, chrom2_idx, *row_offsets)
-
-        fh.write(zlib.compress(index, _COMPRESS_LEVEL))
-        fh.seek(_offset)
-        fh.write(struct.pack('<QI', offset, blocksize))
-
-    def close(self):
-        try:
-            self._fh.close()
-        except AttributeError:
-            pass
-        finally:
-            self._fh = None
-
-    def __del__(self):
-        self.close()
-
-
 def open(filename, mode='r'):
     try:
-        fh = File(filename, mode)
+        fh = Glasson(filename, mode)
     except RuntimeError as e:
         # logging.critical(format(e.args[0]))
         fh = None
