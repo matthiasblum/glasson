@@ -23,17 +23,14 @@ def create_glasson(chrom_sizes_file, bed_files, mat_files, labels, output, buffe
 
 
 def create(chrom_sizes_file, bed_files, mat_files, mat_labels, output):
-    chrom_sizes = glasson.load_chrom_sizes(chrom_sizes_file)
+    chrom_sizes = glasson._read_chromsizes(chrom_sizes_file)
 
-    gla = glasson.Glasson(output, mode='w', chrom_sizes=chrom_sizes)
+    with glasson.Glasson(output, mode='w', chrom_sizes=chrom_sizes) as gla:
 
-    for bed, mat, label in zip(bed_files, mat_files, mat_labels):
-        gla.add_mat(bed, mat, label)
-        break
+        for bed, mat, label in zip(bed_files, mat_files, mat_labels):
+            gla.add_mat(bed, mat, label)
 
-    gla.freeze(processes=4, verbose=True, buffersize=50000000, tmpdir='.')
-
-    gla.close()
+        gla.freeze(processes=4, verbose=True, buffersize=50000000, tmpdir='.')
 
 
 def main():
@@ -45,12 +42,13 @@ def main():
     fh = glasson.open(filename)
 
     # chr1:0-chrM:16,571 & chr4:7,862,541-chr15:94,379,315 [offset 0,4306017:0,0]
-    # result = fh.query(('chr1', 0, 'chrM', 0), ('chr4', 7000000, 'chr15', 94000000), resolution=1000000)
-    result = fh.query(('chr1', 0, 3100000), resolution=1000000)
+    result = fh.query(('chr1', 0, 'chrM', 0), ('chr4', 7000000, 'chr15', 94000000), resolution=500000)
+    #result = fh.query(('chr1', 0, 3100000), resolution=1000000)
 
     for chrom1, chrom2, rows, cols, values in result:
         for i, j, v in zip(rows, cols, values):
             print(chrom1, chrom2, i, j, v)
+
 
 
     fh.close()

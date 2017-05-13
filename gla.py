@@ -1,4 +1,3 @@
-import builtins
 import gzip
 import logging
 import os
@@ -8,7 +7,6 @@ import tempfile
 import zlib
 
 from multiprocessing import Pool
-from urllib.error import HTTPError
 
 try:
     import h5py
@@ -20,6 +18,7 @@ else:
 if sys.version_info[0] == 3:
     import pickle
     import urllib.request as request
+    from urllib.error import HTTPError, URLError
 else:
     try:
         import cPickle as pickle
@@ -27,6 +26,7 @@ else:
         import pickle
 
     import urllib2 as request
+    from urllib2 import HTTPError, URLError
     range = xrange
 
 
@@ -43,7 +43,7 @@ _VERSION = 1
 _COMPRESS_LEVEL = 6
 
 
-def _open_text(filename, mode='rt'):
+def _open(filename, mode='rt'):
     """
     Open a text file and return a file handler.
 
@@ -56,13 +56,61 @@ def _open_text(filename, mode='rt'):
 
     Returns
     -------
-        File handler
+        File handler or None (if the file can not be opened)
 
     """
-    if filename.lower().endswith('.gz'):
-        return gzip.open(filename, mode=mode)
+    try:
+        if filename.lower().endswith('.gz'):
+            fh = gzip.open(filename, mode=mode)
+        else:
+            fh = open(filename, mode=mode)
+    except IOError:
+        return None
     else:
-        return builtins.open(filename, mode=mode)
+        return fh
+
+
+def _read_chromsizes(path_or_db):
+    """
+    Read a UCSC-style chrom.sizes file.
+    
+    Parameters
+    ----------
+    path : str
+        File path or database (e.g.: hg38, hg18, mm9, ...)
+
+    Returns
+    -------
+    List of chromosomes (chrom name, chrom size in bp)
+
+    """
+    chrom_sizes = []
+
+    fh = _open(path_or_db, mode='rt')
+    if fh:
+        content = fh.read().strip().decode()
+        fh.close()
+    else:
+        try:
+            res = request.urlopen('http://hgdownload.cse.ucsc.edu/goldenPath/{0}/bigZips/{0}.chrom.sizes'.format(path_or_db))
+        except (HTTPError, URLError):
+            logging.critical('invalid UCSC database: {}'.format(path_or_db))
+            exit(1)
+        else:
+            content = res.read().strip().decode()
+
+    for i, line in enumerate(content.split('\n')):
+        try:
+            name, size = line.rstrip().split()
+            size = int(size)
+        except ValueError:
+            print(line)
+            logging.critical('invalid format at line {} in file/database {}'.format(i + 1, path_or_db))
+            exit(1)
+        else:
+            chrom_sizes.append((name, size))
+
+    return chrom_sizes
 
 
 def _fetch(url, offset, size=None):
@@ -92,43 +140,10 @@ def _fetch(url, offset, size=None):
 
     try:
         res = request.urlopen(req)
-    except HTTPError:
+    except (HTTPError, URLError):
         raise RuntimeError('glasson: file not found')
     else:
         return res.read()
-
-
-def load_chrom_sizes(filename):
-    """
-    Parse a UCSC chrom.sizes file.
-
-    Parameters
-    ----------
-    filename : str
-        File path. May be gzip-compressed.
-
-    Returns
-    -------
-    List of tuples ``(chrom_name, chrom_size)``.
-
-    """
-    chrom_sizes = []
-
-    fh = _open_text(filename, mode='rt')
-
-    for i, line in enumerate(fh):
-        try:
-            name, size = line.rstrip().split()
-            size = int(size)
-        except ValueError:
-            logging.critical('invalid format at line {} in file {}'.format(i + 1, filename))
-            fh.close()
-            exit(1)
-        else:
-            chrom_sizes.append((name, size))
-
-    fh.close()
-    return chrom_sizes
 
 
 class ContactMap:
@@ -194,7 +209,7 @@ class ContactMap:
         self._bs = 0
         cnt = 0
 
-        fh = _open_text(self._bed_file, mode='rt')
+        fh = _open(self._bed_file, mode='rt')
 
         i = 0
         for i, line in enumerate(fh):
@@ -255,7 +270,7 @@ class ContactMap:
 
         status = True
 
-        fh = _open_text(self._mat_file, mode='rt')
+        fh = _open(self._mat_file, mode='rt')
 
         for i, line in enumerate(fh):
             if verbose and not (i + 1) % 1000000:
@@ -315,7 +330,7 @@ class ContactMap:
                         data = self._contacts[chrom1][chrom2]
 
                         if chrom1 in self._files and chrom2 in self._files[chrom1]:
-                            with builtins.open(self._files[chrom1][chrom2], 'rb') as pfh:
+                            with open(self._files[chrom1][chrom2], 'rb') as pfh:
                                 data += pickle.load(pfh)
                         else:
                             fd, path = tempfile.mkstemp(dir=tmpdir)
@@ -326,7 +341,7 @@ class ContactMap:
                             else:
                                 self._files[chrom1][chrom2] = path
 
-                        with builtins.open(self._files[chrom1][chrom2], 'wb') as pfh:
+                        with open(self._files[chrom1][chrom2], 'wb') as pfh:
                             pickle.dump(data, pfh)
 
                         self._contacts[chrom1][chrom2] = []
@@ -338,7 +353,7 @@ class ContactMap:
     def _is_coo(filename, limit=10000):
         b = True
 
-        fh = _open_text(filename, mode='rt')
+        fh = _open(filename, mode='rt')
 
         for i, line in enumerate(fh):
             if i == limit:
@@ -362,7 +377,7 @@ class ContactMap:
         b = True
         n = None
 
-        fh = _open_text(filename, mode='rt')
+        fh = _open(filename, mode='rt')
 
         for i, line in enumerate(fh):
             if i == limit:
@@ -408,7 +423,7 @@ class ContactMap:
             for chrom2 in self._contacts[chrom1]:
                 path = self._files.get(chrom1, {}).get(chrom2)
                 if path:
-                    with builtins.open(self._files[chrom1][chrom2], 'rb') as fh:
+                    with open(self._files[chrom1][chrom2], 'rb') as fh:
                         yield chrom1, chrom2, iter(pickle.load(fh) + self._contacts[chrom1][chrom2])
                 else:
                     yield chrom1, chrom2, iter(self._contacts[chrom1][chrom2])
@@ -438,7 +453,7 @@ class Glasson:
 
         if mode == 'r':
             if os.path.isfile(path):
-                self._fh = builtins.open(path, 'rb')
+                self._fh = open(path, 'rb')
             elif path.lower().startswith(('http://', 'https://')):
                 self._remote = True
             else:
@@ -446,7 +461,7 @@ class Glasson:
 
             self._sniff()
         elif mode == 'w':
-            self._fh = builtins.open(path, 'wb')
+            self._fh = open(path, 'wb')
         else:
             raise RuntimeError("invalid mode: '{}'\n".format(mode))
 
@@ -578,7 +593,7 @@ class Glasson:
                     cols = []
                     values = []
                     while row == i:
-                        cols.append(row)
+                        cols.append(col)
                         values.append(val)
                         try:
                             row, col, val = next(contacts)
@@ -625,7 +640,7 @@ class Glasson:
 
     def _sniff(self):
         """
-        Verify that file passed to the constructor is a valid GLA file, and parse the header/index if it is.
+        Verify that the file passed to the constructor is a valid GLA file, and parse its header/index if it is.
         """
         self._chrom_sizes = []
         self._maps = []
@@ -639,7 +654,7 @@ class Glasson:
         signature, version, offset, blocksize = struct.unpack('<3sHQI', data)
 
         try:
-            is_gla = signature.decode('utf-8') == 'GLA'
+            is_gla = signature.decode() == 'GLA'
         except UnicodeDecodeError:
             is_gla = False
 
@@ -658,7 +673,7 @@ class Glasson:
             l, chrom_size = struct.unpack('<HI', data[x:x+6])
             x += 6
 
-            chrom_name = data[x:x+l].decode('utf-8')
+            chrom_name = data[x:x+l].decode()
             x += l
 
             self._chrom_sizes.append((chrom_name, chrom_size))
@@ -667,17 +682,14 @@ class Glasson:
         x += 2
 
         for i in range(n_maps):
-            l, = struct.unpack('<I', data[x:x+4])
-            x += 4
+            l, bin_size = struct.unpack('<2I', data[x:x+8])
+            x += 8
 
             if l:
-                label = data[x:x+l].decode('utf-8')
+                label = data[x:x+l].decode()
                 x += l
             else:
                 label = None
-
-            bin_size, = struct.unpack('<I', data[x:x+4])
-            x += 4
 
             m = {
                 'name': label,
@@ -773,20 +785,20 @@ class Glasson:
 
         return i, j
 
-    def query(self, x_range, y_range=None, resolution=None):
-        if len(x_range) == 3:
-            x_chrom1, x_start, x_end = x_range
+    def query(self, range1, range2=None, resolution=None):
+        if len(range1) == 3:
+            x_chrom1, x_start, x_end = range1
             x_chrom2 = x_chrom1
         else:
-            x_chrom1, x_start, x_chrom2, x_end = x_range
+            x_chrom1, x_start, x_chrom2, x_end = range1
 
-        if not y_range:
+        if not range2:
             y_chrom1, y_start, y_chrom2, y_end = x_chrom1, x_start, x_chrom2, x_end
-        elif len(y_range) == 3:
-            y_chrom1, y_start, y_end = y_range
+        elif len(range2) == 3:
+            y_chrom1, y_start, y_end = range2
             y_chrom2 = y_chrom1
         else:
-            y_chrom1, y_start, y_chrom2, y_end = y_range
+            y_chrom1, y_start, y_chrom2, y_end = range2
 
         chrom_names = [chrom_name.lower() for chrom_name, chrom_size in self._chrom_sizes]
         x_i, x_j = self._get_chrom_range(x_chrom1, x_chrom2, chrom_names)
@@ -917,12 +929,3 @@ class Glasson:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-
-def open(filename, mode='r'):
-    try:
-        fh = Glasson(filename, mode)
-    except RuntimeError as e:
-        # logging.critical(format(e.args[0]))
-        fh = None
-    finally:
-        return fh
