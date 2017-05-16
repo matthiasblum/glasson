@@ -19,7 +19,7 @@ uint32_t read_uint32(uint8_t *buffer) {
     //return buffer[3] | (buffer[2]<<8) | (buffer[1]<<16) | (buffer[0]<<24);
 }
 
-void write_uint32(FILE *fp, uint32_t i) {
+void write_uint32(uint32_t i, FILE *fp) {
     uint8_t buffer[4];
 
     // BE
@@ -37,14 +37,53 @@ void write_uint32(FILE *fp, uint32_t i) {
     fwrite(&buffer, sizeof(uint8_t), 4, fp);
 }
 
+void write_uint64(uint64_t i, FILE *fp) {
+    uint8_t buffer[8];
+
+    // BE
+    // buffer[0] = (i >> 24) & 0xFF;
+    // buffer[1] = (i >> 16) & 0xFF;
+    // buffer[2] = (i >> 8) & 0xFF;
+    // buffer[3] = i & 0xFF;
+
+    // LE
+    buffer[0] = i & 0xFF;
+    buffer[1] = (i >> 8) & 0xFF;
+    buffer[2] = (i >> 16) & 0xFF;
+    buffer[3] = (i >> 24) & 0xFF;
+    buffer[4] = (i >> 32) & 0xFF;
+    buffer[5] = (i >> 40) & 0xFF;
+    buffer[6] = (i >> 48) & 0xFF;
+    buffer[7] = (i >> 56) & 0xFF;
+
+    fwrite(&buffer, sizeof(uint8_t), 8, fp);
+}
+
 int main(int argc, char const *argv[]) {
     FILE *fp = fopen("test.dat", "w");
     uint32_t i = 1989;
 
-    write_uint32(fp, i);
+    //write_uint32(fp, i);
 
+    char string[] = "Hello, world!";
+    unsigned long sourceLen = strlen(string);
+    uint64_t destLen = compressBound(sourceLen);
+    char *buffer = malloc(destLen * sizeof(char));
+    int ret = compress2 (buffer, &destLen, string, sourceLen, Z_DEFAULT_COMPRESSION);
 
+    write_uint64(destLen, fp);
+    fwrite(buffer, 1, destLen, fp);
 
+    uint32_t *buffer2 = malloc(10 * sizeof(uint32_t));
+    for (i = 0; i < 10; i++) {
+        buffer2[i] = i * 10;
+    }
+
+    ret = compress2 (buffer, &destLen, (const Bytef*)buffer2, sizeof(buffer2), Z_DEFAULT_COMPRESSION);
+    write_uint64(destLen, fp);
+    fwrite(buffer, 1, destLen, fp);
+
+    free(buffer);
     fclose(fp);
 
     /*FILE *fp;
