@@ -11,9 +11,9 @@ from multiprocessing import Pool
 try:
     import h5py
 except ImportError:
-    _SUPPORT_COOLER = False
+    _COOL_SUPPORT = False
 else:
-    _SUPPORT_COOLER = True
+    _COOL_SUPPORT = True
 
 if sys.version_info[0] == 3:
     import pickle
@@ -187,9 +187,8 @@ class ContactMap:
             return 'coo'
         elif self._is_dense(self._mat_file):
             return 'dense'
-        elif _SUPPORT_COOLER:
-            # todo: implement
-            pass
+        elif _COOL_SUPPORT and self.is_cool(self._mat_file):
+            return 'cool'
 
         return None
 
@@ -258,7 +257,7 @@ class ContactMap:
             return self._load_coo(thread_id, **kwargs)
         elif self._format == 'dense':
             pass
-        elif _SUPPORT_COOLER:
+        elif _COOL_SUPPORT:
             pass
 
         return False
@@ -399,6 +398,10 @@ class ContactMap:
         fh.close()
 
         return b
+
+    @staticmethod
+    def _is_cool(filename):
+        raise NotImplementedError()
 
     def empty(self):
         """
@@ -818,8 +821,6 @@ class Glasson:
 
         bin_size = m['binsize']
 
-        result = []
-
         for j in range(y_i, y_j + 1):
             chrom2, chrom2_size = self._chrom_sizes[j]
 
@@ -902,9 +903,9 @@ class Glasson:
 
                     k += 1
 
-                result.append((chrom1, chrom2, rows, cols, values))
+                yield chrom1, chrom2, rows, cols, values
 
-        return result
+        return
 
     def close(self):
         for m in self._maps:
