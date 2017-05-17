@@ -5,11 +5,11 @@
 #include <stdlib.h>
 #include "zlib.h"
 
-// typedef struct chromsize_t {
-//     uint16_t n;
-//     char **chrom;
-//     uint32_t *size;
-// };
+typedef struct chromsize_t {
+    uint16_t n;
+    char **chrom;
+    uint32_t *size;
+};
 
 uint32_t read_uint32(uint8_t *buffer) {
     // LE
@@ -40,12 +40,6 @@ void write_uint32(uint32_t i, FILE *fp) {
 void write_uint64(uint64_t i, FILE *fp) {
     uint8_t buffer[8];
 
-    // BE
-    // buffer[0] = (i >> 24) & 0xFF;
-    // buffer[1] = (i >> 16) & 0xFF;
-    // buffer[2] = (i >> 8) & 0xFF;
-    // buffer[3] = i & 0xFF;
-
     // LE
     buffer[0] = i & 0xFF;
     buffer[1] = (i >> 8) & 0xFF;
@@ -63,82 +57,64 @@ int main(int argc, char const *argv[]) {
     FILE *fp = fopen("test.dat", "w");
     uint32_t i = 1989;
 
-    //write_uint32(fp, i);
+    char *compr;
+    uint64_t destLen;
 
     char string[] = "Hello, world!";
     unsigned long sourceLen = strlen(string);
-    uint64_t destLen = compressBound(sourceLen);
-    char *buffer = malloc(destLen * sizeof(char));
-    int ret = compress2 (buffer, &destLen, string, sourceLen, Z_DEFAULT_COMPRESSION);
+    destLen = compressBound(sourceLen);
+    compr = malloc(destLen * sizeof(char));
+    int ret = compress2 (compr, &destLen, string, sourceLen, Z_DEFAULT_COMPRESSION);
 
-    write_uint64(destLen, fp);
-    fwrite(buffer, 1, destLen, fp);
+    write_uint32(destLen, fp);
+    fwrite(compr, 1, destLen, fp);
+    free(compr);
 
-    uint32_t *buffer2 = malloc(10 * sizeof(uint32_t));
+    uint8_t *bytes = malloc(10 * sizeof(uint8_t));
     for (i = 0; i < 10; i++) {
-        buffer2[i] = i * 10;
+        bytes[i] = i * 2;
     }
 
-    ret = compress2 (buffer, &destLen, (const Bytef*)buffer2, sizeof(buffer2), Z_DEFAULT_COMPRESSION);
-    write_uint64(destLen, fp);
-    fwrite(buffer, 1, destLen, fp);
+    sourceLen = sizeof(uint8_t) * 10;
+    destLen = compressBound(sourceLen);
+    compr = malloc(destLen * sizeof(char));
+    ret = compress2 (compr, &destLen, (const Bytef*)bytes, sourceLen, Z_DEFAULT_COMPRESSION);
+    free(bytes);
+    if (ret != Z_OK) {
+        printf("nope\n");
+    }
 
-    free(buffer);
+    write_uint32(destLen, fp);
+    fwrite(compr, 1, destLen, fp);
+    free(compr);
+
+    uint32_t *values = malloc(10 * sizeof(uint32_t));
+    for (i = 0; i < 10; i++) {
+        values[i] = i * 10;
+    }
+
+    bytes = malloc(10 * 4 * sizeof(uint8_t));
+    for (i = 0; i < 10; i++) {
+        write_uint32(values[i], fp);
+        bytes[i*4] = values[i] & 0xFF;
+        bytes[i*4+1] = (values[i] >> 8) & 0xFF;
+        bytes[i*4+2] = (values[i] >> 16) & 0xFF;
+        bytes[i*4+3] = (values[i] >> 24) & 0xFF;
+    }
+    free(values);
+
+    sourceLen = 10 * 4 * sizeof(uint8_t);
+    destLen = compressBound(sourceLen);
+    compr = malloc(destLen * sizeof(char));
+    printf("%lu\n", compressBound(sourceLen));
+    ret = compress2 (compr, &destLen, (const Bytef*)bytes, sourceLen, Z_DEFAULT_COMPRESSION);
+    free(bytes);
+
+    write_uint32(destLen, fp);
+    fwrite(compr, 1, destLen, fp);
+
+    free(compr);
+
     fclose(fp);
-
-    /*FILE *fp;
-    fp = fopen("test.dat", "r");
-
-    uint8_t buf[4];
-    fread(&buf, sizeof(uint8_t), 4, fp);
-
-    uint32_t i = read_uint32(buf);
-    printf("%u\n", i);
-
-    char *zbuffer = malloc(i * sizeof(char));
-
-    fread(zbuffer, i, 1, fp);
-
-    free(zbuffer);
-
-    fclose(fp);
-    return 0;*/
-
-    // FILE *fp = fopen("test.dat", "w");
-    //
-    // z_stream strm;
-    // int ret, flush;
-    // /* allocate deflate state */
-    // strm.zalloc = Z_NULL;
-    // strm.zfree = Z_NULL;
-    // strm.opaque = Z_NULL;
-    // ret = deflateInit(&strm, level);
-    // if (ret != Z_OK)
-    //     return ret;
-
-
-
-    // fread(buffer, 11, 1, fp);
-    //
-    // printf("%s\n", buffer);
-    //
-    // z_stream defstream;
-    // z_stream infstream;
-    // infstream.zalloc = Z_NULL;
-    // infstream.zfree = Z_NULL;
-    // infstream.opaque = Z_NULL;
-    // setup "b" as the input and "c" as the compressed output
-    // infstream.avail_in = (uInt)((char*)defstream.next_out - buffer); // size of input
-    // infstream.next_in = (Bytef *)buffer; // input char array
-    // infstream.avail_out = (uInt)sizeof(unc_buffer); // size of output
-    // infstream.next_out = (Bytef *)unc_buffer; // output char array
-    //
-    // // the actual DE-compression work.
-    // inflateInit(&infstream);
-    // inflate(&infstream, Z_NO_FLUSH);
-    // inflateEnd(&infstream);
-    //
-    // printf("%s\n", unc_buffer);
-    // fclose(fp);
     return 0;
 }

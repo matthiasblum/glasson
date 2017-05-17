@@ -14,11 +14,16 @@ import zlib
 #     print(s)
 
 with open('test.dat', 'rb') as fh:
-    l, = struct.unpack('<Q', fh.read(8))
-    print(l)
+    l, = struct.unpack('<I', fh.read(4))
     print(zlib.decompress(fh.read(l)))
 
-    l, = struct.unpack('<Q', fh.read(8))
+    l, = struct.unpack('<I', fh.read(4))
+    s = zlib.decompress(fh.read(l))
+    print(struct.unpack('<10B', s))
+
+    print(struct.unpack('<10I', fh.read(10 * 4)))
+
+    l, = struct.unpack('<I', fh.read(4))
     s = zlib.decompress(fh.read(l))
     print(struct.unpack('<10I', s))
 
