@@ -1,3 +1,4 @@
+import math
 import gzip
 import logging
 import os
@@ -88,8 +89,13 @@ def _read_chromsizes(path_or_db):
 
     fh = _open(path_or_db, mode='rt')
     if fh:
-        content = fh.read().strip().decode()
-        fh.close()
+        content = fh.read().strip()
+        try:
+            content = content.decode()
+        except AttributeError:
+            pass
+        finally:
+            fh.close()
     else:
         try:
             res = request.urlopen('http://hgdownload.cse.ucsc.edu/goldenPath/{0}/bigZips/{0}.chrom.sizes'.format(path_or_db))
@@ -104,7 +110,6 @@ def _read_chromsizes(path_or_db):
             name, size = line.rstrip().split()
             size = int(size)
         except ValueError:
-            print(line)
             logging.critical('invalid format at line {} in file/database {}'.format(i + 1, path_or_db))
             exit(1)
         else:
@@ -172,6 +177,10 @@ class ContactMap:
         self._files = {}
 
     @property
+    def filename(self):
+        return self._mat_file
+
+    @property
     def format(self):
         return self._format
 
@@ -187,7 +196,7 @@ class ContactMap:
             return 'coo'
         elif self._is_dense(self._mat_file):
             return 'dense'
-        elif _COOL_SUPPORT and self.is_cool(self._mat_file):
+        elif _COOL_SUPPORT and self._is_cool(self._mat_file):
             return 'cool'
 
         return None
@@ -419,7 +428,7 @@ class ContactMap:
         
         Returns
         -------
-        tuple : (``'chrom1'``, ``'chrom1'``, ``'contacts'``). ``'contacts'`` is an iterator of tuples (``'i'``, ``'j'``, ``'v'``).
+        tuple : (``'chrom1'``, ``'chrom2'``, ``'contacts'``). ``'contacts'`` is an iterator of tuples (``'i'``, ``'j'``, ``'v'``).
 
         """
         for chrom1 in self._contacts:
@@ -496,11 +505,83 @@ class Glasson:
         if not all(result):
             return
 
-        # Reassign result, as ContactMap instances processed by map() are copies
-        self._maps = result
+        # Get the indices that would sort the maps by bin_size
+        # Thus maps with bin_size = 0 (RE frags) are first
+        indices = sorted(range(len(result)), key=lambda i: result[i].bin_size)
+
+        # Sort maps and labels
+        self._maps = [result[i] for i in indices]
+        self._labels = [self._labels[i] for i in indices]
+
+        zoom_levels = {}
+        for i, m in enumerate(self._maps):
+            bs = m.bin_size
+
+            if bs:
+                if bs not in zoom_levels:
+                    zoom_levels[bs] = [self._labels[i]]
+                elif self._labels[i] in zoom_levels[bs]:
+                    logging.critical('cannot distinguish maps with bin_size = {} bp: use labels'.format(bs))
+                    exit(1)
+                else:
+                    zoom_levels[bs].append(self._labels[i])
+            else:  # todo: frag res
+                pass
+
+        zoom_levels = {40000: [None], 100000: [None], 500000: [None], 1000000: [None]}
+
+        if aggregate:
+            """
+            Construct zoom levels by aggregating bins of the contact map with the highest resolution.
+            Each zoom level has bins 4 times larger than the previous.
+            A zoom level may be "skipped" in a contact map is provided for the zoom level's resolution (+/- 25%).
+            If two or more contact maps of the highest resolution have been provided (e.g. raw and normalized counts),
+            two maps will be constructed for each zoom level, using the original maps' labels.
+
+            5kb raw         5kb norm        5kb fithic
+
+            40kb raw        40kb norm
+
+            100kb raw
+
+            500kb raw       500kb norm
+            """
+            tot_size = sum([size for chrom, size in self._chrom_sizes])
+            bin_sizes = sorted(zoom_levels.keys())
+
+            bs = bin_sizes[0]
+            n = len(bin_sizes) - 1
+            i = 0
+
+            '''
+            TODO: create aggregator object
+            '''
+
+            while bs * 1024 < tot_size:
+
+                if bs * 0.75 <= bin_sizes[i] <= bs * 1.25:
+                    print('skip', bin_sizes[i])
+                else:
+                    while i < n and bin_sizes[i] < bs:
+                        i += 1
+
+                    if bs * 0.75 <= bin_sizes[i] <= bs * 1.25:
+                        print('skip', bin_sizes[i])
+                    else:
+                        print('agg', bs, bin_sizes[i])
+
+
+
+                # add zoom before * 4
+
+                bs *= 4
+
+
+
+
+        return
 
         # Load contacts
-        # todo: load asynchronously and write header while waiting the first map to be ready
         with Pool(processes) as pool:
             if verbose:
                 logging.info('loading contacts')
@@ -514,10 +595,12 @@ class Glasson:
         # Reassign again
         self._maps = result
 
+        return
+
         if verbose:
             logging.info('writing output')
 
-        # For convenience only #lazyass
+        # For convenience
         fh = self._fh
 
         # Write header
