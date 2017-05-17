@@ -30,29 +30,29 @@ def create(chrom_sizes_file, bed_files, mat_files, mat_labels, output):
         for bed, mat, label in zip(bed_files, mat_files, mat_labels):
             gla.add_mat(bed, mat, label)
 
-        gla.freeze(processes=4, verbose=True, buffersize=50000000, tmpdir='.')
+        gla.freeze(processes=4, verbose=True, buffersize=20000000, tmpdir='.', aggregate=1)
 
 
 def main():
-    url = 'http://hglab.org/data/SRX2179260.gla'
-    filename = '/home/mblum/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla'
-    if not os.path.isfile(filename):
-        filename = '/home/matthias/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla'
-
-    fh = glasson.open(filename)
-
-    # chr1:0-chrM:16,571 & chr4:7,862,541-chr15:94,379,315 [offset 0,4306017:0,0]
-    result = fh.query(('chr1', 0, 'chrM', 0), ('chr4', 7000000, 'chr15', 94000000), resolution=500000)
-    #result = fh.query(('chr1', 0, 3100000), resolution=1000000)
-
-    for chrom1, chrom2, rows, cols, values in result:
-        for i, j, v in zip(rows, cols, values):
-            print(chrom1, chrom2, i, j, v)
-
-
-
-    fh.close()
-    return
+    # url = 'http://hglab.org/data/SRX2179260.gla'
+    # filename = '/home/mblum/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla'
+    # if not os.path.isfile(filename):
+    #     filename = '/home/matthias/Dropbox/Perso/labs/igbmc_2013_strasbourg/HiC/Ren/SRX2179260/SRX2179260.gla'
+    #
+    # fh = glasson.open(filename)
+    #
+    # # chr1:0-chrM:16,571 & chr4:7,862,541-chr15:94,379,315 [offset 0,4306017:0,0]
+    # result = fh.query(('chr1', 0, 'chrM', 0), ('chr4', 7000000, 'chr15', 94000000), resolution=500000)
+    # #result = fh.query(('chr1', 0, 3100000), resolution=1000000)
+    #
+    # for chrom1, chrom2, rows, cols, values in result:
+    #     for i, j, v in zip(rows, cols, values):
+    #         print(chrom1, chrom2, i, j, v)
+    #
+    #
+    #
+    # fh.close()
+    # return
 
 
     parser = argparse.ArgumentParser(description='Storage format for Hi-C data')
@@ -71,7 +71,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == 'store':
-        for filename in [args.chrom_sizes] + args.bed_files + args.mat_files:
+        for filename in args.bed_files + args.mat_files:
             if not os.path.isfile(filename):
                 sys.stderr.write('cannot access {}: no such file or directory\n'.format(filename))
                 exit(1)
