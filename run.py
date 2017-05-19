@@ -9,28 +9,14 @@ import sys
 import gla as glasson
 
 
-def create_glasson(chrom_sizes_file, bed_files, mat_files, labels, output, buffersize=0):
-    fh = glasson.open(output, mode='w')
-    chrom_sizes = glasson.load_chrom_sizes(chrom_sizes_file)
-    fh.chrom_sizes(chrom_sizes)
-
-    for bed_file, mat_file, label in zip(bed_files, mat_files, labels):
-        cmap = glasson.ContactMap(bed_file, mat_file, chrom_sizes)
-        fh.add(cmap, label)
-
-    fh.write(verbose=True, buffersize=buffersize, tmpdir='.')
-    fh.close()
-
-
-def create(chrom_sizes_file, bed_files, mat_files, mat_labels, output):
-    chrom_sizes = glasson._read_chromsizes(chrom_sizes_file)
+def create(chrom_sizes_file, bed_files, mat_files, output):
+    chrom_sizes = glasson.read_chromsizes(chrom_sizes_file)
 
     with glasson.Glasson(output, mode='w', chrom_sizes=chrom_sizes) as gla:
-
-        for bed, mat, label in zip(bed_files, mat_files, mat_labels):
-            gla.add_mat(bed, mat, label)
-
-        gla.freeze(processes=4, verbose=True, buffersize=20000000, tmpdir='.', aggregate=1)
+        gla.load_fragments(bed_files, mat_files, processes=4, verbose=True)
+        gla.load_maps(processes=4, buffersize=20000000, tmpdir='.', verbose=True)
+        gla.aggregate(fold=4, tmpdir='.')
+        gla.freeze()
 
 
 def main():
@@ -64,7 +50,6 @@ def main():
     parser_create.add_argument('output', help='output file')
     parser_create.add_argument('-f', dest='bed_files', help='fragment BED files', nargs='+', required=True)
     parser_create.add_argument('-m', dest='mat_files', help='matrix files', nargs='+', required=True)
-    parser_create.add_argument('-l', dest='labels', help='matrix labels', nargs='*')
 
     parser_create.add_argument('--buffersize', type=int, metavar='INT', default=10000000, help='buffer size')
 
@@ -81,27 +66,8 @@ def main():
                              'and matrix files ({})\n'.format(len(args.bed_files), len(args.mat_files)))
             exit(1)
 
-        labels = [None] * len(args.bed_files)
-        if args.labels:
-            if len(args.labels) > len(args.bed_files):
-                sys.stderr.write('too many labels: '
-                                 'expected {}, got {}\n'.format(len(args.labels), len(args.bed_files)))
-
-            for i, e in enumerate(args.labels):
-                try:
-                    x, label = e.split(':', 1)
-                    x = int(x) - 1
-                except ValueError:
-                    if len(args.labels) == len(args.bed_files):
-                        labels[i] = e
-                    else:
-                        sys.stderr.write('invalid labels\n')  # todo: better error message
-                        exit(1)
-                else:
-                    labels[x] = label
-
         #create_glasson(args.chrom_sizes , args.bed_files, args.mat_files, labels, args.output, buffersize=args.buffersize)
-        create(args.chrom_sizes, args.bed_files, args.mat_files, labels, args.output)
+        create(args.chrom_sizes, args.bed_files, args.mat_files, args.output)
 
 
 if __name__ == '__main__':

@@ -71,7 +71,7 @@ def _open(filename, mode='rt'):
         return fh
 
 
-def _read_chromsizes(path_or_db):
+def read_chromsizes(path_or_db):
     """
     Read a UCSC-style chrom.sizes file.
     
@@ -151,12 +151,37 @@ def _fetch(url, offset, size=None):
         return res.read()
 
 
+def import_glasson(filename):
+
+    with open(filename, 'rb') as fh:
+        data = pickle.load(fh)
+
+    fh = Glasson(data['path'], mode='w', chrom_sizes=data['chromsizes'])
+    fh._maps = data['maps']
+    fh._persit = True
+    return fh
+
+
+def _mkstemp(**kwargs):
+    fd, path = tempfile.mkstemp(
+        prefix=kwargs.get('prefix'),
+        suffix=kwargs.get('suffix'),
+        dir=kwargs.get('dir')
+    )
+    os.close(fd)
+    return path
+
+
 class ContactMap:
     def __init__(self, bed_file, mat_file, chrom_sizes):
         self._bed_file = bed_file
         self._mat_file = mat_file
         self._chrom_sizes = {chrom.lower(): size for chrom, size in chrom_sizes}
-        self._format = self._detect_format()
+
+        if bed_file and mat_file:
+            self._format = self._detect_format()
+        else:
+            self._format = None
 
         # frag ID -> chrom
         self._frag_ids = {}
@@ -265,9 +290,9 @@ class ContactMap:
         if self._format == 'coo':
             return self._load_coo(thread_id, **kwargs)
         elif self._format == 'dense':
-            pass
+            pass # todo
         elif _COOL_SUPPORT:
-            pass
+            pass # todo
 
         return False
 
@@ -341,8 +366,7 @@ class ContactMap:
                             with open(self._files[chrom1][chrom2], 'rb') as pfh:
                                 data += pickle.load(pfh)
                         else:
-                            fd, path = tempfile.mkstemp(dir=tmpdir)
-                            os.close(fd)
+                            path = _mkstemp(dir=tmpdir)
 
                             if chrom1 not in self._files:
                                 self._files[chrom1] = {chrom2: path}
@@ -440,6 +464,45 @@ class ContactMap:
                 else:
                     yield chrom1, chrom2, iter(self._contacts[chrom1][chrom2])
 
+    def aggregate(self, bin_size, tmpdir=tempfile.gettempdir()):
+        m = ContactMap(None, None, self._chrom_sizes.items())
+        m._bs = bin_size
+        fold = bin_size / self._bs
+
+        for chrom1, chrom2, contacts in self.get_contacts():
+            rows = []
+            cols = []
+            vals = []
+            r = None
+            c = None
+
+            for row, col, val in contacts:
+                row //= fold
+                col //= fold
+
+                if row == r and col == c:
+                    vals[-1] += val
+                else:
+                    rows.append(row)
+                    cols.append(col)
+                    vals.append(val)
+
+                r = row
+                c = col
+
+            path = _mkstemp(dir=tmpdir)
+            with open(path, 'wb') as fh:
+                pickle.dump([(rows[i], cols[i], vals[i]) for i in range(len(rows))], fh)
+
+            if chrom1 not in m._files:
+                m._files[chrom1] = {chrom2: path}
+                m._contacts[chrom1] = {chrom2: []}
+            else:
+                m._files[chrom1][chrom2] = path
+                m._contacts[chrom1][chrom2] = []
+
+        return m
+
 
 class Glasson:
     def __init__(self, path, mode='r', chrom_sizes=list()):
@@ -459,9 +522,9 @@ class Glasson:
         self._path = path
         self._chrom_sizes = chrom_sizes
         self._maps = []
-        self._labels = []
         self._fh = None
         self._remote = False
+        self._persit = False
 
         if mode == 'r':
             if os.path.isfile(path):
@@ -481,19 +544,17 @@ class Glasson:
     def chrom_sizes(self):
         return self._chrom_sizes
 
-    def add_mat(self, bed_file, mat_file, mat_label):
+    def _add_mat(self, bed_file, mat_file):
         m = ContactMap(bed_file, mat_file, self._chrom_sizes)
 
         if not m.format:
             raise RuntimeError('cannot detect format for file {}'.format(mat_file))
+        else:
+            self._maps.append(m)
 
-        self._maps.append(m)
-        self._labels.append(mat_label)
-
-    def freeze(self, aggregate=0, buffersize=0, processes=1, tmpdir=tempfile.gettempdir(), verbose=False):
-        processes = min([processes, len(self._maps)])
-        if buffersize:
-            buffersize //= processes
+    def load_fragments(self, bed_files, mat_files, processes=1, verbose=False):
+        for bed, mat in zip(bed_files, mat_files):
+            self._add_mat(bed, mat)
 
         # Load fragments
         with Pool(processes) as pool:
@@ -502,84 +563,17 @@ class Glasson:
 
             result = pool.map(self._load_fragments, self._maps)
 
-        if not all(result):
-            return
+        if all(result):
+            # Sort maps by bin size (thus maps with bin_size = 0 (RE frags) are first
+            self._maps = sorted(result, key=lambda x: x.bin_size)
+            return True
+        else:
+            return False
 
-        # Get the indices that would sort the maps by bin_size
-        # Thus maps with bin_size = 0 (RE frags) are first
-        indices = sorted(range(len(result)), key=lambda i: result[i].bin_size)
-
-        # Sort maps and labels
-        self._maps = [result[i] for i in indices]
-        self._labels = [self._labels[i] for i in indices]
-
-        zoom_levels = {}
-        for i, m in enumerate(self._maps):
-            bs = m.bin_size
-
-            if bs:
-                if bs not in zoom_levels:
-                    zoom_levels[bs] = [self._labels[i]]
-                elif self._labels[i] in zoom_levels[bs]:
-                    logging.critical('cannot distinguish maps with bin_size = {} bp: use labels'.format(bs))
-                    exit(1)
-                else:
-                    zoom_levels[bs].append(self._labels[i])
-            else:  # todo: frag res
-                pass
-
-        zoom_levels = {40000: [None], 100000: [None], 500000: [None], 1000000: [None]}
-
-        if aggregate:
-            """
-            Construct zoom levels by aggregating bins of the contact map with the highest resolution.
-            Each zoom level has bins 4 times larger than the previous.
-            A zoom level may be "skipped" in a contact map is provided for the zoom level's resolution (+/- 25%).
-            If two or more contact maps of the highest resolution have been provided (e.g. raw and normalized counts),
-            two maps will be constructed for each zoom level, using the original maps' labels.
-
-            5kb raw         5kb norm        5kb fithic
-
-            40kb raw        40kb norm
-
-            100kb raw
-
-            500kb raw       500kb norm
-            """
-            tot_size = sum([size for chrom, size in self._chrom_sizes])
-            bin_sizes = sorted(zoom_levels.keys())
-
-            bs = bin_sizes[0]
-            n = len(bin_sizes) - 1
-            i = 0
-
-            '''
-            TODO: create aggregator object
-            '''
-
-            while bs * 1024 < tot_size:
-
-                if bs * 0.75 <= bin_sizes[i] <= bs * 1.25:
-                    print('skip', bin_sizes[i])
-                else:
-                    while i < n and bin_sizes[i] < bs:
-                        i += 1
-
-                    if bs * 0.75 <= bin_sizes[i] <= bs * 1.25:
-                        print('skip', bin_sizes[i])
-                    else:
-                        print('agg', bs, bin_sizes[i])
-
-
-
-                # add zoom before * 4
-
-                bs *= 4
-
-
-
-
-        return
+    def load_maps(self, processes=1, buffersize=0, tmpdir=tempfile.gettempdir(), verbose=False):
+        processes = min([processes, len(self._maps)])
+        if buffersize:
+            buffersize //= processes
 
         # Load contacts
         with Pool(processes) as pool:
@@ -589,17 +583,53 @@ class Glasson:
             items = [(i + 1, cmap, kwargs) for i, cmap in enumerate(self._maps)]
             result = pool.map(self._load_contacts, items)
 
-        if not all(result):
-            return
+        if all(result):
+            # Reassign again
+            self._maps = result
+            return True
+        else:
+            return False
 
-        # Reassign again
-        self._maps = result
+    def aggregate(self, fold=4, processes=1, tmpdir=tempfile.gettempdir()):
+        # Get the indices that would sort the maps by bin_size
+        # Thus maps with bin_size = 0 (RE frags) are first
+        #indices = sorted(range(len(result)), key=lambda i: result[i].bin_size)
+        # Sort maps and labels
+        #self._maps = [result[i] for i in indices]
 
-        return
+        # Zoom levels (fixed-size bins only)
+        zoom_levels = [m.bin_size for m in self._maps if m.bin_size]
 
-        if verbose:
-            logging.info('writing output')
+        try:
+            m = [m for m in self._maps if m.bin_size][0]
+        except IndexError:
+            raise IndexError  # todo
 
+        """
+        Construct zoom levels by aggregating bins of the contact map with the highest resolution.
+        Each zoom level has bins 4 times larger than the previous.
+        A zoom level may be "skipped" in a contact map is provided for the zoom level's resolution (+/- 25%).
+        """
+        tot_size = sum([size for chrom, size in self._chrom_sizes])
+        bs = zoom_levels[0]  # smallest bin size
+        n = len(zoom_levels) - 1
+        i = 0
+
+        items = []
+        while bs * 1024 < tot_size:
+            if zoom_levels[i] < bs * 0.75 or zoom_levels[i] > bs * 1.25:
+                while i < n and zoom_levels[i] < bs:
+                    i += 1
+
+                if zoom_levels[i] < bs * 0.75 or zoom_levels[i] > bs * 1.25:
+                    items.append((m, bs, tmpdir))
+
+            bs *= fold
+
+        with Pool(processes) as pool:
+            self._maps += pool.map(self._aggregate, items)
+
+    def freeze(self):
         # For convenience
         fh = self._fh
 
@@ -620,23 +650,10 @@ class Glasson:
         fh.write(struct.pack('<H', len(self._maps)))
         blocksize += 2
 
-        # Get the indices that would sort the maps by bin_size
-        # Thus maps with bin_size = 0 (RE frags) are first
-        indices = sorted(range(len(self._maps)), key=lambda i: self._maps[i].bin_size)
-
-        # Sort maps and labels
-        self._maps = [self._maps[i] for i in indices]
-        self._labels = [self._labels[i] for i in indices]
-
-        for m, label in zip(self._maps, self._labels):
-            l = len(label) if label else 0
+        for m in self._maps:
             bin_size = m.bin_size
-            fh.write(struct.pack('<2I', l, bin_size))
-
-            if l:
-                fh.write(label.encode())
-
-            blocksize += 8 + l
+            fh.write(struct.pack('<I', bin_size))
+            blocksize += 4
 
             if not bin_size:
                 # variable-size windows (RE fragments): store start positions
@@ -714,6 +731,11 @@ class Glasson:
         fh.write(zlib.compress(index, _COMPRESS_LEVEL))
         fh.seek(5)
         fh.write(struct.pack('<QI', offset, blocksize))
+
+    @staticmethod
+    def _aggregate(args):
+        cmap, fold, tmpdir = args
+        return cmap.aggregate(fold, tmpdir)
 
     @staticmethod
     def _load_contacts(args):
@@ -990,12 +1012,23 @@ class Glasson:
 
         return
 
+    def export(self, dest):
+        self._persit = True
+
+        with open(dest, 'wb') as fh:
+            pickle.dump({
+                'path': self._path,
+                'chromsizes': self._chrom_sizes,
+                'maps': self._maps
+            }, fh)
+
     def close(self):
-        for m in self._maps:
-            try:
-                m.empty()
-            except AttributeError:
-                pass
+        if not self._persit:
+            for m in self._maps:
+                try:
+                    m.empty()
+                except AttributeError:
+                    pass
 
         try:
             self._fh.close()
