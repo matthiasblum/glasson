@@ -5,18 +5,7 @@ import argparse
 import os
 import sys
 
-
-import gla as glasson
-
-
-def create(chrom_sizes_file, bed_files, mat_files, output):
-    chrom_sizes = glasson.read_chromsizes(chrom_sizes_file)
-
-    with glasson.Glasson(output, mode='w', chrom_sizes=chrom_sizes) as gla:
-        gla.load_fragments(bed_files, mat_files, processes=4, verbose=True)
-        gla.load_maps(processes=4, buffersize=20000000, tmpdir='.', verbose=True)
-        gla.aggregate(fold=4, tmpdir='.')
-        gla.freeze()
+import glacon
 
 
 def main():
@@ -51,7 +40,9 @@ def main():
     parser_create.add_argument('-f', dest='bed_files', help='fragment BED files', nargs='+', required=True)
     parser_create.add_argument('-m', dest='mat_files', help='matrix files', nargs='+', required=True)
 
-    parser_create.add_argument('--buffersize', type=int, metavar='INT', default=10000000, help='buffer size')
+    parser_create.add_argument('--buffersize', type=int, metavar='INT', default=0, help='buffer size')
+    parser_create.add_argument('-p', dest='processes', type=int, metavar='INT', default=1, help='process threads')
+    parser_create.add_argument('-q', dest='quiet', action='store_true', default=False, help='do not print progress messages')
 
     args = parser.parse_args()
 
@@ -66,8 +57,11 @@ def main():
                              'and matrix files ({})\n'.format(len(args.bed_files), len(args.mat_files)))
             exit(1)
 
-        #create_glasson(args.chrom_sizes , args.bed_files, args.mat_files, labels, args.output, buffersize=args.buffersize)
-        create(args.chrom_sizes, args.bed_files, args.mat_files, args.output)
+        glacon.create(args.chrom_sizes, args.bed_files, args.mat_files, args.output,
+                      buffersize=args.buffersize,
+                      processes=args.processes,
+                      verbose=(not args.quiet),
+                      tmp='tmp')
 
 
 if __name__ == '__main__':
