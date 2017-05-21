@@ -33,7 +33,7 @@ else:
 
 logging.basicConfig(
     level=logging.INFO,
-    format='glasson: %(asctime)s: %(message)s',
+    format='glacon: %(asctime)s: %(message)s',
     datefmt='%y-%m-%d %H:%M:%S',
     stream=sys.stdout
 )
@@ -71,7 +71,7 @@ def _open(filename, mode='rt'):
         return fh
 
 
-def read_chromsizes(path_or_db):
+def _read_chromsizes(path_or_db):
     """
     Read a UCSC-style chrom.sizes file.
     
@@ -146,20 +146,9 @@ def _fetch(url, offset, size=None):
     try:
         res = request.urlopen(req)
     except (HTTPError, URLError):
-        raise RuntimeError('glasson: file not found')
+        raise RuntimeError('glacon: file not found')
     else:
         return res.read()
-
-
-def import_glasson(filename):
-
-    with open(filename, 'rb') as fh:
-        data = pickle.load(fh)
-
-    fh = Glasson(data['path'], mode='w', chrom_sizes=data['chromsizes'])
-    fh._maps = data['maps']
-    fh._persit = True
-    return fh
 
 
 def _mkstemp(**kwargs):
@@ -306,7 +295,7 @@ class ContactMap:
         fh = _open(self._mat_file, mode='rt')
 
         for i, line in enumerate(fh):
-            if verbose and not (i + 1) % 1000000:
+            if verbose and not (i + 1) % 10000000:
                 logging.info('{}{} contacts parsed'.format(
                     'thread #' + str(thread_id) + ': ' if thread_id else '', i + 1)
                 )
@@ -379,6 +368,28 @@ class ContactMap:
                         self._contacts[chrom1][chrom2] = []
 
         fh.close()
+
+        if buffersize:
+            for chrom1 in self._contacts:
+                for chrom2 in self._contacts[chrom1]:
+                    data = self._contacts[chrom1][chrom2]
+
+                    if chrom1 in self._files and chrom2 in self._files[chrom1]:
+                        with open(self._files[chrom1][chrom2], 'rb') as pfh:
+                            data += pickle.load(pfh)
+                    else:
+                        path = _mkstemp(dir=tmpdir)
+
+                        if chrom1 not in self._files:
+                            self._files[chrom1] = {chrom2: path}
+                        else:
+                            self._files[chrom1][chrom2] = path
+
+                    with open(self._files[chrom1][chrom2], 'wb') as pfh:
+                        pickle.dump(data, pfh)
+
+                    self._contacts[chrom1][chrom2] = []
+
         return status
 
     @staticmethod
@@ -477,8 +488,8 @@ class ContactMap:
             c = None
 
             for row, col, val in contacts:
-                row //= fold
-                col //= fold
+                row = math.floor(row / fold)
+                col = math.floor(col / fold)
 
                 if row == r and col == c:
                     vals[-1] += val
@@ -504,7 +515,7 @@ class ContactMap:
         return m
 
 
-class Glasson:
+class glacon:
     def __init__(self, path, mode='r', chrom_sizes=list()):
         """
         Parameters
@@ -552,15 +563,12 @@ class Glasson:
         else:
             self._maps.append(m)
 
-    def load_fragments(self, bed_files, mat_files, processes=1, verbose=False):
+    def load_fragments(self, bed_files, mat_files, processes=1):
         for bed, mat in zip(bed_files, mat_files):
             self._add_mat(bed, mat)
 
         # Load fragments
         with Pool(processes) as pool:
-            if verbose:
-                logging.info('loading fragments')
-
             result = pool.map(self._load_fragments, self._maps)
 
         if all(result):
@@ -715,7 +723,7 @@ class Glasson:
 
                 submap_offsets.append((chrom1, chrom2, row_offsets))
 
-            m.empty()
+            #m.empty()
             map_offsets.append(submap_offsets)
 
         # Index/footer
@@ -767,7 +775,7 @@ class Glasson:
             is_gla = False
 
         if not is_gla:
-            raise RuntimeError('glasson: not a valid GLA file')
+            raise RuntimeError('glacon: not a valid GLA file')
 
         if self._remote:
             data = _fetch(self._path, 17, blocksize)
@@ -1012,16 +1020,6 @@ class Glasson:
 
         return
 
-    def export(self, dest):
-        self._persit = True
-
-        with open(dest, 'wb') as fh:
-            pickle.dump({
-                'path': self._path,
-                'chromsizes': self._chrom_sizes,
-                'maps': self._maps
-            }, fh)
-
     def close(self):
         if not self._persit:
             for m in self._maps:
@@ -1046,3 +1044,47 @@ class Glasson:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+
+def dump(gl, dest):
+    gl._persit = True
+
+    with open(dest, 'wb') as fh:
+        pickle.dump({
+            'path': gl._path,
+            'chromsizes': gl._chrom_sizes,
+            'maps': gl._maps
+        }, fh)
+
+
+def load(filename):
+    with open(filename, 'rb') as fh:
+        data = pickle.load(fh)
+
+    gl = glacon(data['path'], mode='w', chrom_sizes=data['chromsizes'])
+    gl._maps = data['maps']
+    gl._persit = True
+    return gl
+
+
+def create(assembly, bed_files, mat_files, output, **kwargs):
+    buffersize = kwargs.get('buffersize', 0)
+    processes = kwargs.get('processes', 1)
+    verbose = kwargs.get('verbose', True)
+    tmpdir = kwargs.get('tmp', tempfile.gettempdir())
+
+    chrom_sizes = _read_chromsizes(assembly)
+
+    with glacon(output, mode='w', chrom_sizes=chrom_sizes) as gla:
+        if verbose:
+            logging.info('loading fragments')
+        gla.load_fragments(bed_files, mat_files, processes=processes)
+
+        gla.load_maps(processes=processes, buffersize=buffersize, tmpdir=tmpdir, verbose=verbose)
+
+        if verbose:
+            logging.info('aggregating maps')
+        gla.aggregate(fold=4, tmpdir=tmpdir)
+
+        if verbose:
+            logging.info('writing output file')
+        gla.freeze()
