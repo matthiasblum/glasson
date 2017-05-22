@@ -569,15 +569,9 @@ class File:
         for bed, mat in zip(bed_files, mat_files):
             self._add_mat(bed, mat)
 
-        if processes > 1:
-            pool = Pool(processes)
-            map = pool.map
-
         # Load fragments
-        result = map(self._load_fragments, self._maps)
-
-        if processes > 1:
-            pool.close()
+        with Pool(processes) as pool:
+            result = pool.map(self._load_fragments, self._maps)
 
         if all(result):
             # Sort maps by bin size (thus maps with bin_size = 0 (RE frags) are first
@@ -593,18 +587,11 @@ class File:
         if buffersize:
             buffersize //= processes
 
-        if processes > 1:
-            pool = Pool(processes)
-            map = pool.map
-
-        items = [(cmap, kwargs) for cmap in self._maps]
-        kwargs = dict(buffersize=buffersize, verbose=self._verbose, tmpdir=tmpdir)
-
         # Load contacts
-        result = map(self._load_contacts, items)
-
-        if processes > 1:
-            pool.close()
+        with Pool(processes) as pool:
+            kwargs = dict(buffersize=buffersize, verbose=self._verbose, tmpdir=tmpdir)
+            items = [(cmap, kwargs) for cmap in self._maps]
+            result = pool.map(self._load_contacts, items)
 
         if all(result):
             # Reassign again
@@ -653,14 +640,8 @@ class File:
             if self._verbose:
                 logging.info('aggregating maps [{}]'.format(', '.join([str(it[1]) for it in items])))
 
-            if processes > 1:
-                pool = Pool(processes)
-                map = pool.map
-
-            self._maps += map(self._aggregate, items)
-
-            if processes > 1:
-                pool.close()
+            with Pool(processes) as pool:
+                self._maps += pool.map(self._aggregate, items)
 
     def freeze(self):
         if self._verbose:
@@ -744,7 +725,6 @@ class File:
                     n = len(cols)
                     if n:
                         s = zlib.compress(struct.pack('<I{0}I{0}d'.format(n), n, *(cols + values)), _COMPRESS_LEVEL)
-                        #s = struct.pack('<I{0}I{0}d'.format(n), n, *(cols + values))
                         l = len(s)
                         fh.write(struct.pack('<I{}s'.format(l), l, s))
                         offset += 4 + l
