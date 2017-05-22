@@ -161,7 +161,7 @@ def _mkstemp(**kwargs):
     return path
 
 
-class ContactMap:
+class _ContactMap:
     def __init__(self, bed_file, mat_file, chrom_sizes):
         self._bed_file = bed_file
         self._mat_file = mat_file
@@ -470,7 +470,7 @@ class ContactMap:
                     yield chrom1, chrom2, iter(self._contacts[chrom1][chrom2])
 
     def aggregate(self, bin_size, tmpdir=tempfile.gettempdir()):
-        m = ContactMap(None, None, self._chrom_sizes.items())
+        m = _ContactMap(None, None, self._chrom_sizes.items())
         m._bs = bin_size
         fold = bin_size / self._bs
 
@@ -555,7 +555,7 @@ class Glacon:
         return [(m['binsize'], m['chrom_frags']) for m in self._maps]
 
     def _add_mat(self, bed_file, mat_file):
-        m = ContactMap(bed_file, mat_file, self._chrom_sizes)
+        m = _ContactMap(bed_file, mat_file, self._chrom_sizes)
 
         if not m.format:
             raise RuntimeError('cannot detect format for file {}'.format(mat_file))
