@@ -509,7 +509,7 @@ class _ContactMap:
         return m
 
 
-class Glacon:
+class File:
     def __init__(self, path, mode='r', chrom_sizes=list(), verbose=False):
         """
         Parameters
@@ -569,9 +569,15 @@ class Glacon:
         for bed, mat in zip(bed_files, mat_files):
             self._add_mat(bed, mat)
 
+        if processes > 1:
+            pool = Pool(processes)
+            map = pool.map
+
         # Load fragments
-        with Pool(processes) as pool:
-            result = pool.map(self._load_fragments, self._maps)
+        result = map(self._load_fragments, self._maps)
+
+        if processes > 1:
+            pool.close()
 
         if all(result):
             # Sort maps by bin size (thus maps with bin_size = 0 (RE frags) are first
@@ -587,11 +593,18 @@ class Glacon:
         if buffersize:
             buffersize //= processes
 
+        if processes > 1:
+            pool = Pool(processes)
+            map = pool.map
+
+        items = [(cmap, kwargs) for cmap in self._maps]
+        kwargs = dict(buffersize=buffersize, verbose=self._verbose, tmpdir=tmpdir)
+
         # Load contacts
-        with Pool(processes) as pool:
-            kwargs = dict(buffersize=buffersize, verbose=self._verbose, tmpdir=tmpdir)
-            items = [(cmap, kwargs) for cmap in self._maps]
-            result = pool.map(self._load_contacts, items)
+        result = map(self._load_contacts, items)
+
+        if processes > 1:
+            pool.close()
 
         if all(result):
             # Reassign again
@@ -640,8 +653,14 @@ class Glacon:
             if self._verbose:
                 logging.info('aggregating maps [{}]'.format(', '.join([str(it[1]) for it in items])))
 
-            with Pool(processes) as pool:
-                self._maps += pool.map(self._aggregate, items)
+            if processes > 1:
+                pool = Pool(processes)
+                map = pool.map
+
+            self._maps += map(self._aggregate, items)
+
+            if processes > 1:
+                pool.close()
 
     def freeze(self):
         if self._verbose:
@@ -1058,27 +1077,6 @@ class Glacon:
         self.close()
 
 
-def dump(gl, dest):
-    gl._persit = True
-
-    with open(dest, 'wb') as fh:
-        pickle.dump({
-            'path': gl._path,
-            'chromsizes': gl._chrom_sizes,
-            'maps': gl._maps
-        }, fh)
-
-
-def load(filename):
-    with open(filename, 'rb') as fh:
-        data = pickle.load(fh)
-
-    gl = Glacon(data['path'], mode='w', chrom_sizes=data['chromsizes'])
-    gl._maps = data['maps']
-    gl._persit = True
-    return gl
-
-
 def create(assembly, bed_files, mat_files, output, **kwargs):
     buffersize = kwargs.get('buffersize', 0)
     processes = kwargs.get('processes', 1)
@@ -1095,12 +1093,12 @@ def create(assembly, bed_files, mat_files, output, **kwargs):
     #     pool = None
     #     _map = map
 
-    with Glacon(output, mode='w', chrom_sizes=chrom_sizes, verbose=verbose) as gla:
-        gla.load_fragments(bed_files, mat_files, processes=processes)
-        gla.load_maps(processes=processes, buffersize=buffersize, tmpdir=tmpdir)
+    with File(output, mode='w', chrom_sizes=chrom_sizes, verbose=verbose) as f:
+        f.load_fragments(bed_files, mat_files, processes=processes)
+        f.load_maps(processes=processes, buffersize=buffersize, tmpdir=tmpdir)
         if aggregate:
-            gla.aggregate(fold=4, tmpdir=tmpdir)
-        gla.freeze()
+            f.aggregate(fold=4, tmpdir=tmpdir)
+        f.freeze()
 
     # if processes > 1:
     #     pool.close()
