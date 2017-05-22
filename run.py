@@ -4,6 +4,7 @@
 import argparse
 import os
 import sys
+import tempfile
 
 import glacon
 
@@ -42,7 +43,11 @@ def main():
 
     parser_create.add_argument('--buffersize', type=int, metavar='INT', default=0, help='buffer size')
     parser_create.add_argument('-p', dest='processes', type=int, metavar='INT', default=1, help='process threads')
-    parser_create.add_argument('-q', dest='quiet', action='store_true', default=False, help='do not print progress messages')
+    parser_create.add_argument('-q', dest='quiet', action='store_true', default=False,
+                               help='do not print progress messages')
+    parser_create.add_argument('--tmp', default=tempfile.gettempdir(),
+                               help='temporary directory (default: {})'.format(tempfile.gettempdir()))
+
 
     args = parser.parse_args()
 
@@ -61,7 +66,7 @@ def main():
                       buffersize=args.buffersize,
                       processes=args.processes,
                       verbose=(not args.quiet),
-                      tmp='tmp')
+                      tmp=args.tmp)
 
 
 if __name__ == '__main__':
