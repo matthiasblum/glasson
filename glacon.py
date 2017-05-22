@@ -272,12 +272,12 @@ class ContactMap:
 
         return status
 
-    def load_contacts(self, thread_id=None, **kwargs):
+    def load_contacts(self, **kwargs):
         self.empty()
         self._contacts = {}
 
         if self._format == 'coo':
-            return self._load_coo(thread_id, **kwargs)
+            return self._load_coo(**kwargs)
         elif self._format == 'dense':
             pass # todo
         elif _COOL_SUPPORT:
@@ -285,20 +285,14 @@ class ContactMap:
 
         return False
 
-    def _load_coo(self, thread_id=None, **kwargs):
-        buffersize = kwargs.get('buffersize', 0)
-        tmpdir = kwargs.get('tmpdir', tempfile.gettempdir())
-        verbose = kwargs.get('verbose', False)
-
+    def _load_coo(self, buffersize=0, tmpdir=tempfile.gettempdir(), verbose=False):
         status = True
 
         fh = _open(self._mat_file, mode='rt')
 
         for i, line in enumerate(fh):
             if verbose and not (i + 1) % 10000000:
-                logging.info('{}{} contacts parsed'.format(
-                    'thread #' + str(thread_id) + ': ' if thread_id else '', i + 1)
-                )
+                logging.info('{}: {} contacts parsed'.format(os.path.basename(self._mat_file), i+1))
 
             fields = line.rstrip().split()
 
@@ -355,7 +349,7 @@ class ContactMap:
                             with open(self._files[chrom1][chrom2], 'rb') as pfh:
                                 data += pickle.load(pfh)
                         else:
-                            path = _mkstemp(dir=tmpdir)
+                            path = _mkstemp(prefix='gla', dir=tmpdir)
 
                             if chrom1 not in self._files:
                                 self._files[chrom1] = {chrom2: path}
@@ -378,7 +372,7 @@ class ContactMap:
                         with open(self._files[chrom1][chrom2], 'rb') as pfh:
                             data += pickle.load(pfh)
                     else:
-                        path = _mkstemp(dir=tmpdir)
+                        path = _mkstemp(prefix='gla', dir=tmpdir)
 
                         if chrom1 not in self._files:
                             self._files[chrom1] = {chrom2: path}
@@ -501,7 +495,7 @@ class ContactMap:
                 r = row
                 c = col
 
-            path = _mkstemp(dir=tmpdir)
+            path = _mkstemp(prefix='gla', dir=tmpdir)
             with open(path, 'wb') as fh:
                 pickle.dump([(rows[i], cols[i], vals[i]) for i in range(len(rows))], fh)
 
@@ -515,8 +509,8 @@ class ContactMap:
         return m
 
 
-class glacon:
-    def __init__(self, path, mode='r', chrom_sizes=list()):
+class Glacon:
+    def __init__(self, path, mode='r', chrom_sizes=list(), verbose=False):
         """
         Parameters
         ----------
@@ -536,6 +530,7 @@ class glacon:
         self._fh = None
         self._remote = False
         self._persit = False
+        self._verbose = verbose
 
         if mode == 'r':
             if os.path.isfile(path):
@@ -555,6 +550,10 @@ class glacon:
     def chrom_sizes(self):
         return self._chrom_sizes
 
+    @property
+    def maps(self):
+        return [(m['binsize'], m['chrom_frags']) for m in self._maps]
+
     def _add_mat(self, bed_file, mat_file):
         m = ContactMap(bed_file, mat_file, self._chrom_sizes)
 
@@ -564,6 +563,9 @@ class glacon:
             self._maps.append(m)
 
     def load_fragments(self, bed_files, mat_files, processes=1):
+        if self._verbose:
+            logging.info('loading fragments')
+
         for bed, mat in zip(bed_files, mat_files):
             self._add_mat(bed, mat)
 
@@ -578,17 +580,17 @@ class glacon:
         else:
             return False
 
-    def load_maps(self, processes=1, buffersize=0, tmpdir=tempfile.gettempdir(), verbose=False):
+    def load_maps(self, processes=1, buffersize=0, tmpdir=tempfile.gettempdir()):
+        if self._verbose:
+            logging.info('loading contacts')
         processes = min([processes, len(self._maps)])
         if buffersize:
             buffersize //= processes
 
         # Load contacts
         with Pool(processes) as pool:
-            if verbose:
-                logging.info('loading contacts')
-            kwargs = dict(buffersize=buffersize, verbose=verbose, tmpdir=tmpdir)
-            items = [(i + 1, cmap, kwargs) for i, cmap in enumerate(self._maps)]
+            kwargs = dict(buffersize=buffersize, verbose=self._verbose, tmpdir=tmpdir)
+            items = [(cmap, kwargs) for cmap in self._maps]
             result = pool.map(self._load_contacts, items)
 
         if all(result):
@@ -599,45 +601,52 @@ class glacon:
             return False
 
     def aggregate(self, fold=4, processes=1, tmpdir=tempfile.gettempdir()):
-        # Get the indices that would sort the maps by bin_size
-        # Thus maps with bin_size = 0 (RE frags) are first
-        #indices = sorted(range(len(result)), key=lambda i: result[i].bin_size)
-        # Sort maps and labels
-        #self._maps = [result[i] for i in indices]
 
-        # Zoom levels (fixed-size bins only)
-        zoom_levels = [m.bin_size for m in self._maps if m.bin_size]
-
-        try:
-            m = [m for m in self._maps if m.bin_size][0]
-        except IndexError:
-            raise IndexError  # todo
 
         """
         Construct zoom levels by aggregating bins of the contact map with the highest resolution.
         Each zoom level has bins 4 times larger than the previous.
         A zoom level may be "skipped" in a contact map is provided for the zoom level's resolution (+/- 25%).
         """
-        tot_size = sum([size for chrom, size in self._chrom_sizes])
-        bs = zoom_levels[0]  # smallest bin size
-        n = len(zoom_levels) - 1
-        i = 0
 
+        # Genome size
+        tot_size = sum([size for chrom, size in self._chrom_sizes])
+
+        # Sort fixed-size maps by bin size
+        maps = [m for m in sorted(self._maps, key=lambda m: m.bin_size) if m.bin_size]
+
+        if not maps and self._verbose:
+            logging.warning('no fixed-size contact maps: skipping aggregation')
+            return
+
+        zoom_levels = [m.bin_size for m in maps]
+
+        # start from the smallest map
+        cmap = maps[0]
+        bs = zoom_levels[0]
         items = []
-        while bs * 1024 < tot_size:
+        i = 0
+        n = len(zoom_levels) - 1
+        while math.ceil(tot_size / bs) > 1000:
             if zoom_levels[i] < bs * 0.75 or zoom_levels[i] > bs * 1.25:
                 while i < n and zoom_levels[i] < bs:
                     i += 1
 
                 if zoom_levels[i] < bs * 0.75 or zoom_levels[i] > bs * 1.25:
-                    items.append((m, bs, tmpdir))
-
+                    items.append((cmap, bs, tmpdir))
             bs *= fold
 
-        with Pool(processes) as pool:
-            self._maps += pool.map(self._aggregate, items)
+        if items:
+            if self._verbose:
+                logging.info('aggregating maps [{}]'.format(', '.join([str(it[1]) for it in items])))
+
+            with Pool(processes) as pool:
+                self._maps += pool.map(self._aggregate, items)
 
     def freeze(self):
+        if self._verbose:
+            logging.info('writing output file')
+
         # For convenience
         fh = self._fh
 
@@ -657,6 +666,8 @@ class glacon:
         # Write maps info
         fh.write(struct.pack('<H', len(self._maps)))
         blocksize += 2
+
+        self._maps.sort(key=lambda m: m.bin_size)
 
         for m in self._maps:
             bin_size = m.bin_size
@@ -686,7 +697,7 @@ class glacon:
 
             for chrom1, chrom2, contacts in m.get_contacts():
                 if bin_size:
-                    n_rows = (chrom_sizes[chrom1] + bin_size - 1) // bin_size
+                    n_rows = int(math.ceil(chrom_sizes[chrom1] / bin_size))
                 else:
                     n_rows = len(m.get_frags(chrom1))
 
@@ -714,6 +725,7 @@ class glacon:
                     n = len(cols)
                     if n:
                         s = zlib.compress(struct.pack('<I{0}I{0}d'.format(n), n, *(cols + values)), _COMPRESS_LEVEL)
+                        #s = struct.pack('<I{0}I{0}d'.format(n), n, *(cols + values))
                         l = len(s)
                         fh.write(struct.pack('<I{}s'.format(l), l, s))
                         offset += 4 + l
@@ -747,8 +759,8 @@ class glacon:
 
     @staticmethod
     def _load_contacts(args):
-        thread_id, cmap, kwargs = args
-        return cmap if cmap.load_contacts(thread_id, **kwargs) else None
+        cmap, kwargs = args
+        return cmap if cmap.load_contacts(**kwargs) else None
 
     @staticmethod
     def _load_fragments(cmap):
@@ -760,7 +772,6 @@ class glacon:
         """
         self._chrom_sizes = []
         self._maps = []
-        self._labels = []
 
         if self._remote:
             data = _fetch(self._path, 0, 17)
@@ -798,17 +809,10 @@ class glacon:
         x += 2
 
         for i in range(n_maps):
-            l, bin_size = struct.unpack('<2I', data[x:x+8])
-            x += 8
-
-            if l:
-                label = data[x:x+l].decode()
-                x += l
-            else:
-                label = None
+            bin_size, = struct.unpack('<I', data[x:x+4])
+            x += 4
 
             m = {
-                'name': label,
                 'binsize': bin_size,
                 'chrom_frags': [],
                 'submaps': {}
@@ -846,7 +850,7 @@ class glacon:
                 chrom2_name, chrom2_size = self._chrom_sizes[chrom2_idx]
 
                 if self._maps[i]['binsize']:
-                    n_rows = (chrom1_size + self._maps[i]['binsize'] - 1) // self._maps[i]['binsize']
+                    n_rows = int(math.ceil(chrom1_size / self._maps[i]['binsize']))
                 else:
                     n_rows = len(self._maps[i]['chrom_frags'][chrom1_idx])
 
@@ -905,16 +909,22 @@ class glacon:
         if len(range1) == 3:
             x_chrom1, x_start, x_end = range1
             x_chrom2 = x_chrom1
-        else:
+        elif len(range1) == 4:
             x_chrom1, x_start, x_chrom2, x_end = range1
+        else:
+            logging.critical('invalid range format')
+            return
 
         if not range2:
             y_chrom1, y_start, y_chrom2, y_end = x_chrom1, x_start, x_chrom2, x_end
         elif len(range2) == 3:
             y_chrom1, y_start, y_end = range2
             y_chrom2 = y_chrom1
-        else:
+        elif len(range2) == 4:
             y_chrom1, y_start, y_chrom2, y_end = range2
+        else:
+            logging.critical('invalid range format')
+            return
 
         chrom_names = [chrom_name.lower() for chrom_name, chrom_size in self._chrom_sizes]
         x_i, x_j = self._get_chrom_range(x_chrom1, x_chrom2, chrom_names)
@@ -939,7 +949,7 @@ class glacon:
 
             if j == y_i:
                 _ys = y_start // bin_size
-                _ye = (y_end + bin_size - 1) // bin_size if j == y_j else 0
+                _ye = int(math.ceil(y_end / bin_size)) if j == y_j else 0
             elif j < y_j:
                 # from the firs row
                 _ys = 0
@@ -947,7 +957,7 @@ class glacon:
             else:
                 # not all the rows
                 _ys = 0
-                _ye = (y_end + bin_size - 1) // bin_size
+                _ye = int(math.ceil(y_end / bin_size))
 
             for i in range(x_i, x_j + 1):
                 if i > j:
@@ -956,9 +966,12 @@ class glacon:
                 chrom1, chrom1_size = self._chrom_sizes[i]
                 row_offsets = m['submaps'].get(chrom1.lower(), {}).get(chrom2.lower(), [])
 
+                if not row_offsets:
+                    continue
+
                 if i == x_i:
                     _xs = x_start // bin_size
-                    _xe = (x_end + bin_size - 1) // bin_size if i == x_j else 0
+                    _xe = int(math.ceil(x_end / bin_size)) if i == x_j else 0
                 elif i < x_j:
                     # all the rows
                     _xs = 0
@@ -966,7 +979,7 @@ class glacon:
                 else:
                     # trim end of the rows
                     _xs = 0
-                    _xe = (x_end + bin_size - 1) // bin_size
+                    _ye = int(math.ceil(x_end / bin_size))
 
                 _rows = []
                 rows = []
@@ -1060,7 +1073,7 @@ def load(filename):
     with open(filename, 'rb') as fh:
         data = pickle.load(fh)
 
-    gl = glacon(data['path'], mode='w', chrom_sizes=data['chromsizes'])
+    gl = Glacon(data['path'], mode='w', chrom_sizes=data['chromsizes'])
     gl._maps = data['maps']
     gl._persit = True
     return gl
@@ -1070,21 +1083,24 @@ def create(assembly, bed_files, mat_files, output, **kwargs):
     buffersize = kwargs.get('buffersize', 0)
     processes = kwargs.get('processes', 1)
     verbose = kwargs.get('verbose', True)
+    aggregate = kwargs.get('aggregate', True)
     tmpdir = kwargs.get('tmp', tempfile.gettempdir())
 
     chrom_sizes = _read_chromsizes(assembly)
 
-    with glacon(output, mode='w', chrom_sizes=chrom_sizes) as gla:
-        if verbose:
-            logging.info('loading fragments')
+    # if processes > 1:
+    #     pool = Pool(processes)
+    #     _map = pool.map
+    # else:
+    #     pool = None
+    #     _map = map
+
+    with Glacon(output, mode='w', chrom_sizes=chrom_sizes, verbose=verbose) as gla:
         gla.load_fragments(bed_files, mat_files, processes=processes)
-
-        gla.load_maps(processes=processes, buffersize=buffersize, tmpdir=tmpdir, verbose=verbose)
-
-        if verbose:
-            logging.info('aggregating maps')
-        gla.aggregate(fold=4, tmpdir=tmpdir)
-
-        if verbose:
-            logging.info('writing output file')
+        gla.load_maps(processes=processes, buffersize=buffersize, tmpdir=tmpdir)
+        if aggregate:
+            gla.aggregate(fold=4, tmpdir=tmpdir)
         gla.freeze()
+
+    # if processes > 1:
+    #     pool.close()
